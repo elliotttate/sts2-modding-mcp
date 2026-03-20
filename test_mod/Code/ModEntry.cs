@@ -5,9 +5,12 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
+using Godot;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Modding;
+using MegaCrit.Sts2.Core.Models.RelicPools;
+using MCPTest.Relics;
 
 namespace MCPTest;
 
@@ -18,7 +21,7 @@ public static class ModEntry
     private static TcpListener? _listener;
     private static Thread? _serverThread;
     private static readonly string LogPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData),
         "MCPTest", "mcptest.log");
 
     public static void Init()
@@ -28,9 +31,31 @@ public static class ModEntry
             Directory.CreateDirectory(Path.GetDirectoryName(LogPath)!);
             WriteLog("=== MCPTest Initializing ===");
 
+            // Register custom content in pools (must happen before game init freezes pools)
+            try
+            {
+                ModHelper.AddModelToPool<SharedRelicPool, McpTestRelic>();
+                WriteLog("Registered McpTestRelic in SharedRelicPool.");
+            }
+            catch (Exception ex2)
+            {
+                WriteLog($"Pool registration (may be too late): {ex2.Message}");
+            }
+
             _harmony = new Harmony("com.elliotttate.mcptest");
             _harmony.PatchAll();
             WriteLog("Harmony patches applied.");
+
+            // Initialize main thread dispatcher for safe game state modification
+            var sceneTree = Engine.GetMainLoop() as SceneTree;
+            if (sceneTree != null)
+            {
+                MainThreadDispatcher.Initialize(sceneTree);
+            }
+            else
+            {
+                WriteLog("WARNING: SceneTree not available for dispatcher!");
+            }
 
             StartBridgeServer();
             WriteLog("Bridge server started on port 21337.");

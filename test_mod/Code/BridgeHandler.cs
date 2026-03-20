@@ -320,33 +320,23 @@ public static class BridgeHandler
             if (_devConsole == null || _processCommandMethod == null)
                 return new { error = "DevConsole not available" };
 
-            var cmdResult = _processCommandMethod.Invoke(_devConsole, new object[] { command });
-            if (cmdResult == null)
-                return new { success = true, command };
-
-            // Extract success and message from CmdResult
-            var resultType = cmdResult.GetType();
-            bool success = true;
-            string message = "";
-
-            // CmdResult is a struct with public fields
-            foreach (var field in resultType.GetFields(BindingFlags.Public | BindingFlags.Instance))
+            // Console commands that modify game state must run on the main thread
+            bool dispatched = false;
+            MainThreadDispatcher.Enqueue(() =>
             {
-                if (field.Name == "success" || field.Name == "Success")
-                    success = (bool)(field.GetValue(cmdResult) ?? true);
-                else if (field.Name == "message" || field.Name == "Message")
-                    message = field.GetValue(cmdResult)?.ToString() ?? "";
-            }
-            foreach (var prop in resultType.GetProperties(BindingFlags.Public | BindingFlags.Instance))
-            {
-                if (prop.Name == "success" || prop.Name == "Success")
-                    success = (bool)(prop.GetValue(cmdResult) ?? true);
-                else if (prop.Name == "message" || prop.Name == "Message")
-                    message = prop.GetValue(cmdResult)?.ToString() ?? "";
-            }
+                try
+                {
+                    var cmdResult = _processCommandMethod!.Invoke(_devConsole, new object[] { command });
+                    ModEntry.WriteLog($"Console (main thread): {command} => done");
+                }
+                catch (Exception ex2)
+                {
+                    ModEntry.WriteLog($"Console main thread error: {ex2.Message}");
+                }
+            });
 
-            ModEntry.WriteLog($"Console: {command} => success={success} msg={message}");
-            return new { success, command, message };
+            ModEntry.WriteLog($"Console dispatched: {command}");
+            return new { success = true, command, dispatched = true };
         }
         catch (Exception ex)
         {
@@ -406,19 +396,28 @@ public static class BridgeHandler
 
             var emptyModifiers = new List<ModifierModel>();
 
-            // Invoke async - fire and forget (game handles the async flow)
-            var task = startMethod.Invoke(nGame, new object?[] {
-                charModel, true,
-                (IReadOnlyList<ActModel>)acts,
-                (IReadOnlyList<ModifierModel>)emptyModifiers,
-                seed, ascension, null
-            });
-
-            // Use TaskHelper to run it safely if needed
-            if (task is System.Threading.Tasks.Task t)
+            // MUST run on main thread - Godot scene operations crash from background threads
+            MainThreadDispatcher.Enqueue(() =>
             {
-                MegaCrit.Sts2.Core.Helpers.TaskHelper.RunSafely(t);
-            }
+                try
+                {
+                    var task = startMethod.Invoke(nGame, new object?[] {
+                        charModel, true,
+                        (IReadOnlyList<ActModel>)acts,
+                        (IReadOnlyList<ModifierModel>)emptyModifiers,
+                        seed, ascension, null
+                    });
+                    if (task is System.Threading.Tasks.Task t)
+                    {
+                        MegaCrit.Sts2.Core.Helpers.TaskHelper.RunSafely(t);
+                    }
+                    ModEntry.WriteLog($"StartRun dispatched to main thread successfully");
+                }
+                catch (Exception ex2)
+                {
+                    ModEntry.WriteLog($"StartRun main thread error: {ex2}");
+                }
+            });
 
             ModEntry.WriteLog($"StartRun: character={characterName}, ascension={ascension}, seed={seed}");
             return new { success = true, character = characterName, ascension, seed };
