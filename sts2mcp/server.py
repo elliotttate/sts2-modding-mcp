@@ -12,6 +12,8 @@ import mcp.types as types
 
 from .game_data import GameDataIndex
 from .mod_gen import ModGenerator
+from .pck_builder import build_pck, list_pck_contents
+from .character_assets import get_character_asset_paths, scaffold_character_assets
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -551,6 +553,73 @@ async def list_tools() -> list[types.Tool]:
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
+        # ── Asset & PCK Tools ──
+        types.Tool(
+            name="build_pck",
+            description=(
+                "Build a Godot .pck resource pack from a directory. Pure Python — no Godot install needed. "
+                "Converts .png images to .ctex format with .import remaps. "
+                "Packs .tscn scenes, .json, .tres files as-is. "
+                "The PCK is required for mods that include visual assets (images, scenes, materials)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source_dir": {"type": "string", "description": "Directory containing mod assets to pack"},
+                    "output_path": {"type": "string", "description": "Output .pck file path"},
+                    "base_prefix": {"type": "string", "default": "", "description": "Path prefix in PCK (e.g., 'MyMod/' for res://MyMod/)"},
+                    "convert_pngs": {"type": "boolean", "default": True, "description": "Convert PNGs to .ctex format"},
+                },
+                "required": ["source_dir", "output_path"],
+            },
+        ),
+        types.Tool(
+            name="list_pck",
+            description="List the contents of a .pck file. Useful for debugging asset loading issues.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pck_path": {"type": "string", "description": "Path to .pck file"},
+                },
+                "required": ["pck_path"],
+            },
+        ),
+        types.Tool(
+            name="scaffold_character_assets",
+            description=(
+                "Generate the complete directory structure and placeholder scenes for a new playable character. "
+                "Creates 8+ .tscn scene files (combat visuals, energy counter, char select, rest site, merchant, etc.), "
+                "localization entries, and a checklist of required image assets. "
+                "Use with generate_character (for C# code) and build_pck (for packaging)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_name": {"type": "string", "description": "Mod namespace/folder name"},
+                    "class_name": {"type": "string", "description": "Character class name (PascalCase)"},
+                    "output_dir": {"type": "string", "description": "Root output directory for assets"},
+                    "sprite_size": {"type": "integer", "default": 300, "description": "Placeholder sprite size in pixels"},
+                },
+                "required": ["mod_name", "class_name", "output_dir"],
+            },
+        ),
+        types.Tool(
+            name="get_character_asset_paths",
+            description=(
+                "Get ALL required asset file paths for a character, organized by category. "
+                "Shows exact res:// paths for combat visuals, energy counter, character select, "
+                "icons, animations, SFX events, Spine animation names, and localization keys. "
+                "Essential reference when creating character assets."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "char_id": {"type": "string", "description": "Character class name"},
+                    "mod_name": {"type": "string", "description": "Mod folder name"},
+                },
+                "required": ["char_id", "mod_name"],
+            },
+        ),
         # ── Live Bridge Tools (require game running with MCPTest mod) ──
         types.Tool(
             name="bridge_ping",
@@ -918,6 +987,32 @@ async def _handle_tool(name: str, args: dict):
 
     elif name == "decompile_game":
         return await _decompile_game()
+
+    # ── Asset & PCK ──
+    elif name == "build_pck":
+        return build_pck(
+            source_dir=args["source_dir"],
+            output_path=args["output_path"],
+            base_prefix=args.get("base_prefix", ""),
+            convert_pngs=args.get("convert_pngs", True),
+        )
+
+    elif name == "list_pck":
+        return list_pck_contents(args["pck_path"])
+
+    elif name == "scaffold_character_assets":
+        return scaffold_character_assets(
+            mod_name=args["mod_name"],
+            class_name=args["class_name"],
+            output_dir=args["output_dir"],
+            sprite_size=args.get("sprite_size", 300),
+        )
+
+    elif name == "get_character_asset_paths":
+        return get_character_asset_paths(
+            char_id=args["char_id"],
+            mod_name=args["mod_name"],
+        )
 
     # ── Live Bridge ──
     elif name == "bridge_ping":
