@@ -1,0 +1,11 @@
+{
+  "id": "mcptest",
+  "pck_name": "MCPTest",
+  "name": "MCPTest",
+  "author": "elliotttate",
+  "description": "MCP Bridge mod - enables live game state querying and console command execution from the MCP",
+  "version": "1.0.0",
+  "has_pck": false,
+  "has_dll": true,
+  "affects_gameplay": false
+}

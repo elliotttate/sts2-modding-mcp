@@ -551,6 +551,84 @@ async def list_tools() -> list[types.Tool]:
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
+        # ── Live Bridge Tools (require game running with MCPTest mod) ──
+        types.Tool(
+            name="bridge_ping",
+            description=(
+                "Check if the game is running and the MCPTest bridge mod is loaded. "
+                "Returns mod version and status. The bridge runs on TCP port 21337."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_get_run_state",
+            description=(
+                "Get the current run state from the live game: act, floor, ascension, "
+                "players with HP/gold/deck size/relic count. Requires game running with MCPTest mod."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_get_combat_state",
+            description=(
+                "Get live combat state: round number, all enemies (HP/block/powers/intents), "
+                "player hand/energy/draw pile/discard pile/powers. Requires active combat."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_get_player_state",
+            description=(
+                "Get detailed player state from the live game: full deck listing, "
+                "all relics, potions, gold, HP. Requires game running with active run."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_get_screen_state",
+            description=(
+                "Get current screen/navigation state: whether a run is in progress, "
+                "in combat, current room type. Useful for knowing what commands are valid."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_start_run",
+            description=(
+                "Start a new singleplayer run in the game. "
+                "Characters: Ironclad, Silent, Regent, Necrobinder, Defect. "
+                "Requires game at main menu (no run in progress)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "character": {"type": "string", "default": "Ironclad",
+                                  "description": "Character class name: Ironclad, Silent, Regent, Necrobinder, Defect"},
+                    "ascension": {"type": "integer", "default": 0, "description": "Ascension level (0-20)"},
+                },
+            },
+        ),
+        types.Tool(
+            name="bridge_console",
+            description=(
+                "Execute a dev console command in the running game. "
+                "Examples: 'gold 999', 'godmode', 'relic add ANCHOR', 'card BASH', "
+                "'fight LAGAVULIN_MATRIARCH_NORMAL', 'heal 999', 'win', 'kill', "
+                "'potion BLOCK_POTION', 'power STRENGTH_POWER 5 0', 'draw 3', "
+                "'unlock all', 'event ABYSSAL_BATHS'. "
+                "Use get_console_commands tool to see all 39 available commands."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Console command to execute (e.g. 'gold 999', 'fight LAGAVULIN_MATRIARCH_NORMAL')",
+                    },
+                },
+                "required": ["command"],
+            },
+        ),
     ]
 
 
@@ -804,6 +882,38 @@ async def _handle_tool(name: str, args: dict):
 
     elif name == "decompile_game":
         return await _decompile_game()
+
+    # ── Live Bridge ──
+    elif name == "bridge_ping":
+        from . import bridge_client
+        return bridge_client.ping()
+
+    elif name == "bridge_get_run_state":
+        from . import bridge_client
+        return bridge_client.get_run_state()
+
+    elif name == "bridge_get_combat_state":
+        from . import bridge_client
+        return bridge_client.get_combat_state()
+
+    elif name == "bridge_get_player_state":
+        from . import bridge_client
+        return bridge_client.get_player_state()
+
+    elif name == "bridge_get_screen_state":
+        from . import bridge_client
+        return bridge_client.get_screen_state()
+
+    elif name == "bridge_start_run":
+        from . import bridge_client
+        return bridge_client.start_run(
+            character=args.get("character", "Ironclad"),
+            ascension=args.get("ascension", 0),
+        )
+
+    elif name == "bridge_console":
+        from . import bridge_client
+        return bridge_client.execute_console_command(args["command"])
 
     else:
         return f"Unknown tool: {name}"
@@ -1761,30 +1871,31 @@ pool.Return(node);  // cleans up signals automatically
 
 
 def _launch_game(remote_debug: bool = False, renderer: str | None = None, extra_args: str = "") -> dict:
-    exe = Path(GAME_DIR) / "SlayTheSpire2.exe"
-    if not exe.exists():
-        return {"success": False, "error": f"Game executable not found at {exe}"}
-
-    args = [str(exe)]
+    # Build Steam launch options string for any extra flags
+    launch_opts = []
     if remote_debug:
-        args.append("--remote-debug")
-        args.append("tcp://127.0.0.1:6007")
+        launch_opts.append("--remote-debug tcp://127.0.0.1:6007")
     if renderer:
-        renderer_map = {
-            "vulkan": "--rendering-driver", "d3d12": "--rendering-driver", "opengl": "--rendering-driver"
-        }
-        if renderer in renderer_map:
-            args.extend(["--rendering-driver", renderer])
+        launch_opts.append(f"--rendering-driver {renderer}")
     if extra_args:
-        args.extend(extra_args.split())
+        launch_opts.append(extra_args)
 
+    # Launch via Steam protocol (required - direct exe launch fails without Steam)
     try:
-        proc = subprocess.Popen(args, cwd=GAME_DIR)
-        return {
+        import platform
+        if platform.system() == "Windows":
+            os.startfile(f"steam://rungameid/2868840")
+        else:
+            subprocess.Popen(["xdg-open", "steam://rungameid/2868840"])
+
+        result: dict = {
             "success": True,
-            "pid": proc.pid,
-            "command": " ".join(args),
+            "method": "steam",
+            "steam_app_id": 2868840,
         }
+        if launch_opts:
+            result["note"] = f"Set these as Steam launch options: {' '.join(launch_opts)}"
+        return result
     except Exception as e:
         return {"success": False, "error": str(e)}
 
