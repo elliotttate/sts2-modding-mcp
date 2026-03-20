@@ -627,6 +627,27 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="bridge_play_card",
+            description=(
+                "Play a card from the player's hand in combat. Specify card_index (0-based position in hand) "
+                "and target_index (0-based enemy index, required for AnyEnemy cards like Strike). "
+                "Use bridge_get_combat_state first to see hand contents and valid targets."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "card_index": {"type": "integer", "description": "Index of card in hand (0-based)"},
+                    "target_index": {"type": "integer", "default": -1, "description": "Target enemy index (for targeted cards)"},
+                },
+                "required": ["card_index"],
+            },
+        ),
+        types.Tool(
+            name="bridge_end_turn",
+            description="End the current player turn in combat.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
             name="bridge_console",
             description=(
                 "Execute a dev console command in the running game. "
@@ -926,6 +947,17 @@ async def _handle_tool(name: str, args: dict):
     elif name == "bridge_get_available_actions":
         from . import bridge_client
         return bridge_client.get_available_actions()
+
+    elif name == "bridge_play_card":
+        from . import bridge_client
+        return bridge_client.play_card(
+            card_index=args["card_index"],
+            target_index=args.get("target_index", -1),
+        )
+
+    elif name == "bridge_end_turn":
+        from . import bridge_client
+        return bridge_client.end_turn()
 
     elif name == "bridge_start_run":
         from . import bridge_client

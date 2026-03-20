@@ -15,6 +15,8 @@ using MegaCrit.Sts2.Core.Models.Characters;
 using MegaCrit.Sts2.Core.MonsterMoves;
 using MegaCrit.Sts2.Core.MonsterMoves.Intents;
 using MegaCrit.Sts2.Core.Runs;
+using MegaCrit.Sts2.Core.Context;
+using MegaCrit.Sts2.Core.GameActions;
 
 namespace MCPTest;
 
@@ -55,6 +57,8 @@ public static class BridgeHandler
                 "get_player_state" => MainThreadDispatcher.Invoke(() => GetPlayerState()),
                 "get_map_state" => MainThreadDispatcher.Invoke(() => GetMapState()),
                 "get_available_actions" => MainThreadDispatcher.Invoke(() => GetAvailableActions()),
+                "play_card" => MainThreadDispatcher.Invoke(() => PlayCard(root)),
+                "end_turn" => MainThreadDispatcher.Invoke(() => EndTurn()),
                 "console" => ExecuteConsoleCommand(cmdParam ?? ""),
                 "start_run" => StartRun(root),
                 _ => new { error = $"Unknown method: {method}" },
@@ -534,6 +538,104 @@ public static class BridgeHandler
             return new { screen, action_count = actions.Count, actions };
         }
         catch (Exception ex) { return new { error = ex.Message }; }
+    }
+
+    // ─── Console Command ─────────────────────────────────────────────────────
+
+    // ─── Play Card ─────────────────────────────────────────────────────────
+
+    private static object PlayCard(JsonElement root)
+    {
+        try
+        {
+            var cm = CombatManager.Instance;
+            if (cm == null || !cm.IsInProgress || !cm.IsPlayPhase)
+                return new { error = "Not in combat or not player turn" };
+
+            int cardIndex = 0;
+            int targetIndex = -1;
+            if (root.TryGetProperty("params", out var p))
+            {
+                if (p.TryGetProperty("card_index", out var ci)) cardIndex = ci.GetInt32();
+                if (p.TryGetProperty("target_index", out var ti)) targetIndex = ti.GetInt32();
+            }
+
+            var combatState = cm.DebugOnlyGetState();
+            if (combatState == null) return new { error = "No combat state" };
+
+            var player = LocalContext.GetMe(RunManager.Instance.DebugOnlyGetState());
+            if (player?.PlayerCombatState?.Hand?.Cards == null)
+                return new { error = "No hand available" };
+
+            var handCards = player.PlayerCombatState.Hand.Cards.ToList();
+            if (cardIndex < 0 || cardIndex >= handCards.Count)
+                return new { error = $"Card index {cardIndex} out of range (hand size: {handCards.Count})" };
+
+            var card = handCards[cardIndex];
+            var cardName = card.GetType().Name;
+
+            if (!card.CanPlay(out var reason, out _))
+                return new { error = $"Card {cardName} cannot be played: {reason}" };
+
+            // Resolve target
+            Creature? target = null;
+            if (card.TargetType == TargetType.AnyEnemy && targetIndex >= 0)
+            {
+                var enemies = combatState.Enemies.ToList();
+                if (targetIndex < enemies.Count)
+                    target = enemies[targetIndex];
+                else
+                    return new { error = $"Target index {targetIndex} out of range (enemies: {enemies.Count})" };
+            }
+            else if (card.TargetType == TargetType.AnyAlly && targetIndex >= 0)
+            {
+                var allies = combatState.Allies.ToList();
+                if (targetIndex < allies.Count)
+                    target = allies[targetIndex];
+            }
+
+            // Play the card
+            bool played = card.TryManualPlay(target);
+            ModEntry.WriteLog($"[PlayCard] {cardName} target={target?.Monster?.GetType().Name ?? target?.Player?.Character?.GetType().Name ?? "none"} => {played}");
+
+            return new { success = played, card = cardName, card_index = cardIndex, target_index = targetIndex };
+        }
+        catch (Exception ex)
+        {
+            ModEntry.WriteLog($"PlayCard error: {ex.Message}");
+            return new { error = ex.Message };
+        }
+    }
+
+    // ─── End Turn ────────────────────────────────────────────────────────────
+
+    private static object EndTurn()
+    {
+        try
+        {
+            var cm = CombatManager.Instance;
+            if (cm == null || !cm.IsInProgress || !cm.IsPlayPhase)
+                return new { error = "Not in combat or not player turn" };
+
+            var state = RunManager.Instance.DebugOnlyGetState();
+            var player = LocalContext.GetMe(state);
+            if (player == null) return new { error = "No player" };
+
+            var combatState = cm.DebugOnlyGetState();
+            if (combatState == null) return new { error = "No combat state" };
+
+            var roundNumber = combatState.RoundNumber;
+            RunManager.Instance.ActionQueueSynchronizer.RequestEnqueue(
+                new EndPlayerTurnAction(player, roundNumber));
+
+            ModEntry.WriteLog($"[EndTurn] Round {roundNumber}");
+            return new { success = true, round = roundNumber };
+        }
+        catch (Exception ex)
+        {
+            ModEntry.WriteLog($"EndTurn error: {ex.Message}");
+            return new { error = ex.Message };
+        }
     }
 
     // ─── Console Command ─────────────────────────────────────────────────────

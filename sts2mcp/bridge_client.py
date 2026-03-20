@@ -82,6 +82,14 @@ def execute_console_command(command: str) -> dict:
     return send_request("console", {"command": command})
 
 
+def play_card(card_index: int, target_index: int = -1) -> dict:
+    return send_request("play_card", {"card_index": card_index, "target_index": target_index})
+
+
+def end_turn() -> dict:
+    return send_request("end_turn")
+
+
 def start_run(character: str = "Ironclad", ascension: int = 0) -> dict:
     return send_request("start_run", {"character": character, "ascension": ascension})
 
