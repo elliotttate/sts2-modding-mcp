@@ -33,11 +33,21 @@ public static class ModEntry
             // Capture main thread SynchronizationContext (MUST be done here, on the main thread)
             MainThreadDispatcher.Capture();
 
-            // Register custom content
+            // Register all custom relics
             try
             {
                 ModHelper.AddModelToPool<SharedRelicPool, McpTestRelic>();
-                WriteLog("Registered McpTestRelic in SharedRelicPool.");
+                ModHelper.AddModelToPool<SharedRelicPool, BloodPact>();
+                ModHelper.AddModelToPool<SharedRelicPool, GoldShield>();
+                ModHelper.AddModelToPool<SharedRelicPool, ThornArmor>();
+                ModHelper.AddModelToPool<SharedRelicPool, WarCry>();
+                ModHelper.AddModelToPool<SharedRelicPool, VampiricBlade>();
+                ModHelper.AddModelToPool<SharedRelicPool, SpellEcho>();
+                ModHelper.AddModelToPool<SharedRelicPool, BerserkerRage>();
+                ModHelper.AddModelToPool<SharedRelicPool, CounterStrike>();
+                ModHelper.AddModelToPool<SharedRelicPool, WeakeningAura>();
+                ModHelper.AddModelToPool<SharedRelicPool, HealingTouch>();
+                WriteLog("Registered 11 custom relics in SharedRelicPool.");
             }
             catch (Exception ex2)
             {
