@@ -556,55 +556,73 @@ async def list_tools() -> list[types.Tool]:
             name="bridge_ping",
             description=(
                 "Check if the game is running and the MCPTest bridge mod is loaded. "
-                "Returns mod version and status. The bridge runs on TCP port 21337."
+                "Returns mod version, current screen, run/combat status. Bridge on TCP 21337."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_get_screen",
+            description=(
+                "Get current game screen: MAIN_MENU, CHARACTER_SELECT, MAP, COMBAT_PLAYER_TURN, "
+                "COMBAT_ENEMY_TURN, COMBAT_LOADING, EVENT, SHOP, REST_SITE, TREASURE, REWARD, "
+                "CARD_SELECTION, GAME_OVER, LOADING, SETTINGS, TIMELINE."
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
         types.Tool(
             name="bridge_get_run_state",
             description=(
-                "Get the current run state from the live game: act, floor, ascension, "
-                "players with HP/gold/deck size/relic count. Requires game running with MCPTest mod."
+                "Get current run state: act, floor, ascension, seed, current room, "
+                "players with HP/gold/deck size/relic count/max energy."
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
         types.Tool(
             name="bridge_get_combat_state",
             description=(
-                "Get live combat state: round number, all enemies (HP/block/powers/intents), "
-                "player hand/energy/draw pile/discard pile/powers. Requires active combat."
+                "Get live combat state with full intent decomposition: round, player turn status, "
+                "enemies (HP/block/powers/intent with damage/hits/total_damage), "
+                "player hand (each card's playability, energy cost, valid targets), "
+                "energy, draw/discard/exhaust pile sizes, powers."
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
         types.Tool(
             name="bridge_get_player_state",
             description=(
-                "Get detailed player state from the live game: full deck listing, "
-                "all relics, potions, gold, HP. Requires game running with active run."
+                "Get detailed player state: full deck with card types/rarities/costs/upgrades, "
+                "all relics with rarities, potion slots, gold, HP."
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
         types.Tool(
-            name="bridge_get_screen_state",
+            name="bridge_get_map_state",
             description=(
-                "Get current screen/navigation state: whether a run is in progress, "
-                "in combat, current room type. Useful for knowing what commands are valid."
+                "Get full map graph: all nodes with row/col, type (Monster/Elite/Boss/Rest/Shop/Event/Treasure), "
+                "visited status, available (can travel to) status, child connections."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_get_available_actions",
+            description=(
+                "Get all currently legal actions: in combat (playable cards with valid targets, end turn), "
+                "on map (available travel destinations with room types), "
+                "plus console command access. Essential for knowing what you can do right now."
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
         types.Tool(
             name="bridge_start_run",
             description=(
-                "Start a new singleplayer run in the game. "
-                "Characters: Ironclad, Silent, Regent, Necrobinder, Defect. "
+                "Start a new singleplayer run. Characters: Ironclad, Silent, Regent, Necrobinder, Defect. "
                 "Requires game at main menu (no run in progress)."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "character": {"type": "string", "default": "Ironclad",
-                                  "description": "Character class name: Ironclad, Silent, Regent, Necrobinder, Defect"},
-                    "ascension": {"type": "integer", "default": 0, "description": "Ascension level (0-20)"},
+                    "character": {"type": "string", "default": "Ironclad"},
+                    "ascension": {"type": "integer", "default": 0},
                 },
             },
         ),
@@ -613,18 +631,15 @@ async def list_tools() -> list[types.Tool]:
             description=(
                 "Execute a dev console command in the running game. "
                 "Examples: 'gold 999', 'godmode', 'relic add ANCHOR', 'card BASH', "
-                "'fight LAGAVULIN_MATRIARCH_NORMAL', 'heal 999', 'win', 'kill', "
+                "'fight AXEBOTS_NORMAL', 'heal 999', 'win', 'kill', "
                 "'potion BLOCK_POTION', 'power STRENGTH_POWER 5 0', 'draw 3', "
                 "'unlock all', 'event ABYSSAL_BATHS'. "
-                "Use get_console_commands tool to see all 39 available commands."
+                "Use get_console_commands for the full list."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "Console command to execute (e.g. 'gold 999', 'fight LAGAVULIN_MATRIARCH_NORMAL')",
-                    },
+                    "command": {"type": "string", "description": "Console command string"},
                 },
                 "required": ["command"],
             },
@@ -888,6 +903,10 @@ async def _handle_tool(name: str, args: dict):
         from . import bridge_client
         return bridge_client.ping()
 
+    elif name == "bridge_get_screen":
+        from . import bridge_client
+        return bridge_client.get_screen()
+
     elif name == "bridge_get_run_state":
         from . import bridge_client
         return bridge_client.get_run_state()
@@ -900,9 +919,13 @@ async def _handle_tool(name: str, args: dict):
         from . import bridge_client
         return bridge_client.get_player_state()
 
-    elif name == "bridge_get_screen_state":
+    elif name == "bridge_get_map_state":
         from . import bridge_client
-        return bridge_client.get_screen_state()
+        return bridge_client.get_map_state()
+
+    elif name == "bridge_get_available_actions":
+        from . import bridge_client
+        return bridge_client.get_available_actions()
 
     elif name == "bridge_start_run":
         from . import bridge_client

@@ -1,50 +1,92 @@
 using System;
-using System.Collections.Concurrent;
+using System.Threading;
 using System.Threading.Tasks;
-using Godot;
+using System.Collections.Concurrent;
 
 namespace MCPTest;
 
 /// <summary>
-/// Uses Godot's CallDeferred to run actions on the main thread.
-/// Since mod C# nodes may not get _Process calls, we use a polling timer instead.
+/// Captures the game's SynchronizationContext at init time and uses it to
+/// dispatch work to the main thread. This is the proper .NET pattern for
+/// cross-thread game state access in Godot/C#.
 /// </summary>
 public static class MainThreadDispatcher
 {
-    private static readonly ConcurrentQueue<Action> _actionQueue = new();
-    private static bool _initialized;
+    private static SynchronizationContext? _gameContext;
 
-    public static void Initialize(SceneTree sceneTree)
+    /// <summary>
+    /// Call this from the mod initializer (which runs on the main thread).
+    /// </summary>
+    public static void Capture()
     {
-        if (_initialized) return;
-        _initialized = true;
-
-        // Create a timer that fires every frame to process the queue
-        var timer = new Timer();
-        timer.WaitTime = 0.016; // ~60fps
-        timer.Autostart = true;
-        timer.Timeout += ProcessQueue;
-        sceneTree.Root.CallDeferred("add_child", timer);
-        ModEntry.WriteLog("MainThreadDispatcher: timer-based dispatcher initialized.");
-    }
-
-    private static void ProcessQueue()
-    {
-        while (_actionQueue.TryDequeue(out var action))
+        _gameContext = SynchronizationContext.Current;
+        if (_gameContext == null)
         {
-            try
-            {
-                action();
-            }
-            catch (Exception ex)
-            {
-                ModEntry.WriteLog($"MainThread action error: {ex.Message}");
-            }
+            ModEntry.WriteLog("WARNING: SynchronizationContext.Current is null! Falling back to direct execution.");
+        }
+        else
+        {
+            ModEntry.WriteLog($"Captured SynchronizationContext: {_gameContext.GetType().Name}");
         }
     }
 
-    public static void Enqueue(Action action)
+    /// <summary>
+    /// Run an action on the main thread (fire and forget).
+    /// </summary>
+    public static void Post(Action action)
     {
-        _actionQueue.Enqueue(action);
+        if (_gameContext != null)
+        {
+            _gameContext.Post(_ =>
+            {
+                try { action(); }
+                catch (Exception ex) { ModEntry.WriteLog($"MainThread Post error: {ex.Message}"); }
+            }, null);
+        }
+        else
+        {
+            // Fallback: run inline (risky but better than nothing)
+            try { action(); }
+            catch (Exception ex) { ModEntry.WriteLog($"Direct exec error: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>
+    /// Run a function on the main thread and return its result. Blocks the calling thread.
+    /// </summary>
+    public static T Invoke<T>(Func<T> func)
+    {
+        if (_gameContext == null)
+        {
+            return func();
+        }
+
+        var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _gameContext.Post(_ =>
+        {
+            try
+            {
+                tcs.SetResult(func());
+            }
+            catch (Exception ex)
+            {
+                tcs.SetException(ex);
+            }
+        }, null);
+
+        // Block until main thread completes (with timeout)
+        if (!tcs.Task.Wait(TimeSpan.FromSeconds(10)))
+        {
+            throw new TimeoutException("Main thread dispatch timed out after 10s");
+        }
+        return tcs.Task.Result;
+    }
+
+    /// <summary>
+    /// Run an action on the main thread and wait for completion.
+    /// </summary>
+    public static void Invoke(Action action)
+    {
+        Invoke<bool>(() => { action(); return true; });
     }
 }

@@ -3,7 +3,6 @@ using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
-using System.Text.Json;
 using System.Threading;
 using Godot;
 using HarmonyLib;
@@ -29,9 +28,12 @@ public static class ModEntry
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(LogPath)!);
-            WriteLog("=== MCPTest Initializing ===");
+            WriteLog("=== MCPTest v2.0 Initializing ===");
 
-            // Register custom content in pools (must happen before game init freezes pools)
+            // Capture main thread SynchronizationContext (MUST be done here, on the main thread)
+            MainThreadDispatcher.Capture();
+
+            // Register custom content
             try
             {
                 ModHelper.AddModelToPool<SharedRelicPool, McpTestRelic>();
@@ -39,29 +41,18 @@ public static class ModEntry
             }
             catch (Exception ex2)
             {
-                WriteLog($"Pool registration (may be too late): {ex2.Message}");
+                WriteLog($"Pool registration: {ex2.Message}");
             }
 
             _harmony = new Harmony("com.elliotttate.mcptest");
             _harmony.PatchAll();
             WriteLog("Harmony patches applied.");
 
-            // Initialize main thread dispatcher for safe game state modification
-            var sceneTree = Engine.GetMainLoop() as SceneTree;
-            if (sceneTree != null)
-            {
-                MainThreadDispatcher.Initialize(sceneTree);
-            }
-            else
-            {
-                WriteLog("WARNING: SceneTree not available for dispatcher!");
-            }
-
             StartBridgeServer();
             WriteLog("Bridge server started on port 21337.");
 
-            Log.Warn("[MCPTest] Loaded successfully! Bridge on port 21337.");
-            WriteLog("=== MCPTest Loaded ===");
+            Log.Warn("[MCPTest] v2.0 loaded! Bridge on port 21337.");
+            WriteLog("=== MCPTest v2.0 Loaded ===");
         }
         catch (Exception ex)
         {
@@ -128,7 +119,7 @@ public static class ModEntry
         }
         catch (Exception ex)
         {
-            WriteLog($"Client handler error: {ex.Message}");
+            WriteLog($"Client error: {ex.Message}");
         }
     }
 }

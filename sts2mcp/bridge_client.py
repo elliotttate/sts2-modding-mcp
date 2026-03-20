@@ -66,8 +66,16 @@ def get_player_state() -> dict:
     return send_request("get_player_state")
 
 
-def get_screen_state() -> dict:
-    return send_request("get_screen_state")
+def get_screen() -> dict:
+    return send_request("get_screen")
+
+
+def get_map_state() -> dict:
+    return send_request("get_map_state")
+
+
+def get_available_actions() -> dict:
+    return send_request("get_available_actions")
 
 
 def execute_console_command(command: str) -> dict:

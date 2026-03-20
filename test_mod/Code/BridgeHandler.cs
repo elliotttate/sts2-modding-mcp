@@ -8,11 +8,13 @@ using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.Entities.Relics;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Characters;
+using MegaCrit.Sts2.Core.MonsterMoves;
+using MegaCrit.Sts2.Core.MonsterMoves.Intents;
 using MegaCrit.Sts2.Core.Runs;
-using MegaCrit.Sts2.Core.Helpers;
 
 namespace MCPTest;
 
@@ -43,15 +45,16 @@ public static class BridgeHandler
                     cmdParam = cmdProp.GetString();
             }
 
+            // State reads run on main thread for safety
             object? result = method switch
             {
-                "ping" => new { status = "ok", mod = "MCPTest", version = "1.0.0",
-                    game_running = true, run_in_progress = RunManager.Instance.IsInProgress,
-                    in_combat = CombatManager.Instance?.IsInProgress ?? false },
-                "get_run_state" => GetRunState(),
-                "get_combat_state" => GetCombatState(),
-                "get_player_state" => GetPlayerState(),
-                "get_screen_state" => GetScreenState(),
+                "ping" => GetPing(),
+                "get_screen" => MainThreadDispatcher.Invoke(() => GetScreen()),
+                "get_run_state" => MainThreadDispatcher.Invoke(() => GetRunState()),
+                "get_combat_state" => MainThreadDispatcher.Invoke(() => GetCombatState()),
+                "get_player_state" => MainThreadDispatcher.Invoke(() => GetPlayerState()),
+                "get_map_state" => MainThreadDispatcher.Invoke(() => GetMapState()),
+                "get_available_actions" => MainThreadDispatcher.Invoke(() => GetAvailableActions()),
                 "console" => ExecuteConsoleCommand(cmdParam ?? ""),
                 "start_run" => StartRun(root),
                 _ => new { error = $"Unknown method: {method}" },
@@ -61,17 +64,49 @@ public static class BridgeHandler
         }
         catch (Exception ex)
         {
-            ModEntry.WriteLog($"HandleRequest error: {ex}");
+            ModEntry.WriteLog($"HandleRequest error: {ex.Message}");
             return JsonSerializer.Serialize(new { error = ex.Message, id = 0 }, JsonOpts);
         }
     }
+
+    // ─── Ping ────────────────────────────────────────────────────────────────
+
+    private static object GetPing()
+    {
+        try
+        {
+            return MainThreadDispatcher.Invoke<object>(() => new
+            {
+                status = "ok",
+                mod = "MCPTest",
+                version = "2.0.0",
+                screen = ScreenDetector.GetCurrentScreen(),
+                run_in_progress = RunManager.Instance.IsInProgress,
+                in_combat = CombatManager.Instance?.IsInProgress ?? false,
+                is_player_turn = CombatManager.Instance?.IsPlayPhase ?? false,
+            });
+        }
+        catch
+        {
+            return new { status = "ok", mod = "MCPTest", version = "2.0.0" };
+        }
+    }
+
+    // ─── Screen ──────────────────────────────────────────────────────────────
+
+    private static object GetScreen()
+    {
+        return new { screen = ScreenDetector.GetCurrentScreen() };
+    }
+
+    // ─── Run State ───────────────────────────────────────────────────────────
 
     private static object GetRunState()
     {
         try
         {
             if (!RunManager.Instance.IsInProgress)
-                return new { in_progress = false };
+                return new { in_progress = false, screen = ScreenDetector.GetCurrentScreen() };
 
             var state = RunManager.Instance.DebugOnlyGetState();
             if (state == null)
@@ -89,27 +124,28 @@ public static class BridgeHandler
                     gold = p.Gold,
                     deck_size = p.Deck?.Cards.Count ?? 0,
                     relic_count = p.Relics?.Count ?? 0,
+                    max_energy = p.PlayerCombatState?.MaxEnergy ?? 3,
                 });
             }
 
             return new
             {
                 in_progress = true,
+                screen = ScreenDetector.GetCurrentScreen(),
                 act = state.CurrentActIndex + 1,
                 floor = state.TotalFloor,
                 act_floor = state.ActFloor,
                 ascension = state.AscensionLevel,
-                player_count = state.Players.Count,
                 seed = state.Rng?.StringSeed ?? "unknown",
                 current_room = state.CurrentRoom?.GetType().Name ?? "none",
+                player_count = state.Players.Count,
                 players,
             };
         }
-        catch (Exception ex)
-        {
-            return new { error = ex.Message };
-        }
+        catch (Exception ex) { return new { error = ex.Message }; }
     }
+
+    // ─── Combat State (with intent decomposition) ────────────────────────────
 
     private static object GetCombatState()
     {
@@ -117,62 +153,127 @@ public static class BridgeHandler
         {
             var cm = CombatManager.Instance;
             if (cm == null || !cm.IsInProgress)
-                return new { in_combat = false };
+                return new { in_combat = false, screen = ScreenDetector.GetCurrentScreen() };
 
             var combatState = cm.DebugOnlyGetState();
             if (combatState == null)
                 return new { in_combat = false };
 
+            // Enemies with intent decomposition
             var enemies = new List<object>();
+            int enemyIdx = 0;
             foreach (var creature in combatState.Enemies)
             {
-                var powers = new List<object>();
-                foreach (var power in creature.Powers)
-                {
-                    powers.Add(new { name = power.GetType().Name, amount = power.Amount });
-                }
+                var powers = creature.Powers
+                    .Select(p => new { name = p.GetType().Name, amount = p.Amount, type = p.Type.ToString() })
+                    .ToList();
 
-                string? nextMove = null;
-                try { nextMove = creature.Monster?.NextMove?.Id; } catch { }
+                // Intent decomposition
+                object? intent = null;
+                try
+                {
+                    var move = creature.Monster?.NextMove;
+                    if (move != null)
+                    {
+                        var intents = move.Intents;
+                        var intentList = new List<object>();
+                        if (intents != null)
+                        {
+                            var allTargets = combatState.Players.Select(p => p.Creature).Cast<Creature>();
+                            foreach (var i in intents)
+                            {
+                                var intentObj = new Dictionary<string, object?>
+                                {
+                                    ["type"] = i.IntentType.ToString(),
+                                };
+
+                                if (i is AttackIntent atk)
+                                {
+                                    try
+                                    {
+                                        intentObj["damage"] = atk.GetSingleDamage(allTargets, creature);
+                                        intentObj["hits"] = atk.Repeats + 1;
+                                        intentObj["total_damage"] = atk.GetTotalDamage(allTargets, creature);
+                                    }
+                                    catch { }
+                                }
+                                intentList.Add(intentObj);
+                            }
+                        }
+                        intent = new { move_id = move.Id, intents = intentList };
+                    }
+                }
+                catch (Exception ex) { ModEntry.WriteLog($"Intent read error: {ex.Message}"); }
 
                 enemies.Add(new
                 {
+                    index = enemyIdx++,
                     name = creature.Monster?.GetType().Name ?? "unknown",
                     hp = creature.CurrentHp,
                     max_hp = creature.MaxHp,
                     block = creature.Block,
                     is_alive = creature.IsAlive,
-                    next_move = nextMove,
+                    intent,
                     powers,
                 });
             }
 
+            // Players with full combat details
             var playerStates = new List<object>();
             foreach (var creature in combatState.Allies)
             {
                 var player = creature.Player;
                 if (player == null) continue;
 
+                var pcs = player.PlayerCombatState;
                 var hand = new List<object>();
-                if (player.PlayerCombatState?.Hand?.Cards != null)
+                int cardIdx = 0;
+                if (pcs?.Hand?.Cards != null)
                 {
-                    foreach (var c in player.PlayerCombatState.Hand.Cards)
+                    foreach (var c in pcs.Hand.Cards)
                     {
+                        bool canPlay = false;
+                        string unplayableReason = "";
+                        try
+                        {
+                            canPlay = c.CanPlay(out var reason, out _);
+                            if (!canPlay) unplayableReason = reason.ToString();
+                        }
+                        catch { }
+
+                        // Determine valid targets
+                        List<int>? validTargets = null;
+                        if (canPlay && (c.TargetType == TargetType.AnyEnemy || c.TargetType == TargetType.AnyAlly))
+                        {
+                            validTargets = new List<int>();
+                            var targets = c.TargetType == TargetType.AnyEnemy ? combatState.Enemies : combatState.Allies;
+                            int tIdx = 0;
+                            foreach (var t in targets)
+                            {
+                                if (t.IsAlive && c.IsValidTarget(t))
+                                    validTargets.Add(tIdx);
+                                tIdx++;
+                            }
+                        }
+
                         hand.Add(new
                         {
+                            index = cardIdx++,
                             name = c.GetType().Name,
-                            cost = c.EnergyCost.ToString(),
                             type = c.Type.ToString(),
+                            energy_cost = (int)c.EnergyCost.Canonical,
+                            can_play = canPlay,
+                            unplayable_reason = canPlay ? null : unplayableReason,
+                            target_type = c.TargetType.ToString(),
+                            valid_targets = validTargets,
                             upgraded = c.CurrentUpgradeLevel > 0,
                         });
                     }
                 }
 
-                var powers = new List<object>();
-                foreach (var p in creature.Powers)
-                {
-                    powers.Add(new { name = p.GetType().Name, amount = p.Amount });
-                }
+                var powers = creature.Powers
+                    .Select(p => new { name = p.GetType().Name, amount = p.Amount, type = p.Type.ToString() })
+                    .ToList();
 
                 playerStates.Add(new
                 {
@@ -180,13 +281,13 @@ public static class BridgeHandler
                     hp = creature.CurrentHp,
                     max_hp = creature.MaxHp,
                     block = creature.Block,
-                    energy = player.PlayerCombatState?.Energy ?? 0,
-                    max_energy = player.PlayerCombatState?.MaxEnergy ?? 0,
+                    energy = pcs?.Energy ?? 0,
+                    max_energy = pcs?.MaxEnergy ?? 0,
                     hand_size = hand.Count,
                     hand,
-                    draw_pile = player.PlayerCombatState?.DrawPile?.Cards.Count ?? 0,
-                    discard_pile = player.PlayerCombatState?.DiscardPile?.Cards.Count ?? 0,
-                    exhaust_pile = player.PlayerCombatState?.ExhaustPile?.Cards.Count ?? 0,
+                    draw_pile = pcs?.DrawPile?.Cards.Count ?? 0,
+                    discard_pile = pcs?.DiscardPile?.Cards.Count ?? 0,
+                    exhaust_pile = pcs?.ExhaustPile?.Cards.Count ?? 0,
                     powers,
                 });
             }
@@ -194,18 +295,17 @@ public static class BridgeHandler
             return new
             {
                 in_combat = true,
+                screen = "COMBAT_PLAYER_TURN",
                 round = combatState.RoundNumber,
                 is_player_turn = cm.IsPlayPhase,
-                enemy_count = enemies.Count,
                 enemies,
                 players = playerStates,
             };
         }
-        catch (Exception ex)
-        {
-            return new { error = ex.Message };
-        }
+        catch (Exception ex) { return new { error = ex.Message }; }
     }
+
+    // ─── Player State ────────────────────────────────────────────────────────
 
     private static object GetPlayerState()
     {
@@ -215,8 +315,7 @@ public static class BridgeHandler
                 return new { error = "No run in progress" };
 
             var state = RunManager.Instance.DebugOnlyGetState();
-            if (state == null)
-                return new { error = "No run state" };
+            if (state == null) return new { error = "No run state" };
 
             var players = new List<object>();
             foreach (var p in state.Players)
@@ -225,25 +324,14 @@ public static class BridgeHandler
                 if (p.Deck?.Cards != null)
                 {
                     foreach (var c in p.Deck.Cards)
-                    {
-                        deck.Add(new
-                        {
-                            name = c.GetType().Name,
-                            type = c.Type.ToString(),
-                            rarity = c.Rarity.ToString(),
-                            cost = c.EnergyCost.ToString(),
-                            upgraded = c.CurrentUpgradeLevel > 0,
-                        });
-                    }
+                        deck.Add(new { name = c.GetType().Name, type = c.Type.ToString(), rarity = c.Rarity.ToString(), energy_cost = (int)c.EnergyCost.Canonical, upgraded = c.CurrentUpgradeLevel > 0 });
                 }
 
                 var relics = new List<object>();
                 if (p.Relics != null)
                 {
                     foreach (var r in p.Relics)
-                    {
                         relics.Add(new { name = r.GetType().Name, rarity = r.Rarity.ToString() });
-                    }
                 }
 
                 var potions = new List<object>();
@@ -253,8 +341,8 @@ public static class BridgeHandler
                     {
                         var pot = p.Potions.ElementAtOrDefault(i);
                         potions.Add(pot != null
-                            ? new { slot = i, name = pot.GetType().Name, rarity = pot.Rarity.ToString() }
-                            : (object)new { slot = i, name = "empty" });
+                            ? (object)new { slot = i, name = pot.GetType().Name, rarity = pot.Rarity.ToString() }
+                            : new { slot = i, name = "empty" });
                     }
                     catch { }
                 }
@@ -267,47 +355,188 @@ public static class BridgeHandler
                     max_hp = p.Creature?.MaxHp ?? 0,
                     gold = p.Gold,
                     deck_count = deck.Count,
-                    deck,
-                    relics,
-                    potions,
+                    deck, relics, potions,
                 });
             }
 
             return new { players };
         }
-        catch (Exception ex)
-        {
-            return new { error = ex.Message };
-        }
+        catch (Exception ex) { return new { error = ex.Message }; }
     }
 
-    private static object GetScreenState()
+    // ─── Map State ───────────────────────────────────────────────────────────
+
+    private static object GetMapState()
     {
         try
         {
-            bool runInProgress = RunManager.Instance.IsInProgress;
-            bool inCombat = CombatManager.Instance?.IsInProgress ?? false;
-            string? currentRoom = null;
+            if (!RunManager.Instance.IsInProgress)
+                return new { error = "No run in progress" };
 
-            if (runInProgress)
+            var state = RunManager.Instance.DebugOnlyGetState();
+            if (state?.Map == null) return new { error = "No map available" };
+
+            var map = state.Map;
+            var visited = new HashSet<string>(state.VisitedMapCoords.Select(c => $"{c.row},{c.col}"));
+
+            var nodes = new List<object>();
+            foreach (var point in map.GetAllMapPoints())
             {
-                var state = RunManager.Instance.DebugOnlyGetState();
-                currentRoom = state?.CurrentRoom?.GetType().Name;
+                var coord = $"{point.coord.row},{point.coord.col}";
+                var children = point.Children?.Select(c => $"{c.coord.row},{c.coord.col}").ToList() ?? new List<string>();
+
+                bool isAvailable = false;
+                if (state.VisitedMapCoords.Count == 0)
+                {
+                    // Start of act - starting node is available
+                    isAvailable = point.coord.row == map.StartingMapPoint.coord.row
+                                && point.coord.col == map.StartingMapPoint.coord.col;
+                }
+                else
+                {
+                    // Children of last visited node
+                    var lastVisited = state.VisitedMapCoords.Last();
+                    var lastPoint = map.GetPoint(lastVisited);
+                    isAvailable = lastPoint?.Children?.Contains(point) ?? false;
+                }
+
+                nodes.Add(new
+                {
+                    row = point.coord.row,
+                    col = point.coord.col,
+                    type = point.PointType.ToString(),
+                    visited = visited.Contains(coord),
+                    available = isAvailable,
+                    children,
+                });
             }
 
             return new
             {
-                run_in_progress = runInProgress,
-                in_combat = inCombat,
-                is_play_phase = inCombat && (CombatManager.Instance?.IsPlayPhase ?? false),
-                current_room = currentRoom,
+                act = state.CurrentActIndex + 1,
+                floor = state.TotalFloor,
+                node_count = nodes.Count,
+                nodes,
             };
         }
-        catch (Exception ex)
-        {
-            return new { error = ex.Message };
-        }
+        catch (Exception ex) { return new { error = ex.Message }; }
     }
+
+    // ─── Available Actions ───────────────────────────────────────────────────
+
+    private static object GetAvailableActions()
+    {
+        try
+        {
+            var screen = ScreenDetector.GetCurrentScreen();
+            var actions = new List<object>();
+
+            if (screen.StartsWith("COMBAT"))
+            {
+                var cm = CombatManager.Instance;
+                if (cm?.IsInProgress == true && cm.IsPlayPhase)
+                {
+                    var combatState = cm.DebugOnlyGetState();
+                    if (combatState != null)
+                    {
+                        // Playable cards
+                        foreach (var creature in combatState.Allies)
+                        {
+                            var player = creature.Player;
+                            if (player?.PlayerCombatState?.Hand?.Cards == null) continue;
+
+                            int cardIdx = 0;
+                            foreach (var card in player.PlayerCombatState.Hand.Cards)
+                            {
+                                if (card.CanPlay())
+                                {
+                                    if (card.TargetType == TargetType.AnyEnemy)
+                                    {
+                                        int enemyIdx = 0;
+                                        foreach (var enemy in combatState.Enemies)
+                                        {
+                                            if (enemy.IsAlive && card.IsValidTarget(enemy))
+                                            {
+                                                actions.Add(new
+                                                {
+                                                    action = "play_card",
+                                                    card_index = cardIdx,
+                                                    target_index = enemyIdx,
+                                                    card_name = card.GetType().Name,
+                                                    target_name = enemy.Monster?.GetType().Name,
+                                                });
+                                            }
+                                            enemyIdx++;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        actions.Add(new
+                                        {
+                                            action = "play_card",
+                                            card_index = cardIdx,
+                                            target_index = (int?)null,
+                                            card_name = card.GetType().Name,
+                                            target_name = (string?)null,
+                                        });
+                                    }
+                                }
+                                cardIdx++;
+                            }
+                        }
+
+                        // End turn is always available during player turn
+                        actions.Add(new { action = "end_turn" });
+                    }
+                }
+            }
+            else if (screen == "MAP")
+            {
+                var state = RunManager.Instance.DebugOnlyGetState();
+                if (state?.Map != null)
+                {
+                    // Available map nodes
+                    if (state.VisitedMapCoords.Count == 0)
+                    {
+                        var start = state.Map.StartingMapPoint;
+                        foreach (var child in start.Children)
+                        {
+                            actions.Add(new
+                            {
+                                action = "travel",
+                                node = $"{child.coord.row},{child.coord.col}",
+                                type = child.PointType.ToString(),
+                            });
+                        }
+                    }
+                    else
+                    {
+                        var lastVisited = state.VisitedMapCoords.Last();
+                        var lastPoint = state.Map.GetPoint(lastVisited);
+                        if (lastPoint?.Children != null)
+                        {
+                            foreach (var child in lastPoint.Children)
+                            {
+                                actions.Add(new
+                                {
+                                    action = "travel",
+                                    node = $"{child.coord.row},{child.coord.col}",
+                                    type = child.PointType.ToString(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            actions.Add(new { action = "console", description = "Execute any console command" });
+
+            return new { screen, action_count = actions.Count, actions };
+        }
+        catch (Exception ex) { return new { error = ex.Message }; }
+    }
+
+    // ─── Console Command ─────────────────────────────────────────────────────
 
     private static object ExecuteConsoleCommand(string command)
     {
@@ -320,30 +549,26 @@ public static class BridgeHandler
             if (_devConsole == null || _processCommandMethod == null)
                 return new { error = "DevConsole not available" };
 
-            // Console commands that modify game state must run on the main thread
-            bool dispatched = false;
-            MainThreadDispatcher.Enqueue(() =>
+            // Dispatch to main thread and wait for result
+            MainThreadDispatcher.Post(() =>
             {
                 try
                 {
-                    var cmdResult = _processCommandMethod!.Invoke(_devConsole, new object[] { command });
-                    ModEntry.WriteLog($"Console (main thread): {command} => done");
+                    _processCommandMethod!.Invoke(_devConsole, new object[] { command });
+                    ModEntry.WriteLog($"Console (main thread): {command}");
                 }
                 catch (Exception ex2)
                 {
-                    ModEntry.WriteLog($"Console main thread error: {ex2.Message}");
+                    ModEntry.WriteLog($"Console error: {ex2.Message}");
                 }
             });
 
-            ModEntry.WriteLog($"Console dispatched: {command}");
-            return new { success = true, command, dispatched = true };
+            return new { success = true, command };
         }
-        catch (Exception ex)
-        {
-            ModEntry.WriteLog($"Console error: {ex}");
-            return new { error = ex.Message, command };
-        }
+        catch (Exception ex) { return new { error = ex.Message, command }; }
     }
+
+    // ─── Start Run ───────────────────────────────────────────────────────────
 
     private static object StartRun(JsonElement root)
     {
@@ -353,22 +578,21 @@ public static class BridgeHandler
                 return new { error = "A run is already in progress" };
 
             string characterName = "Ironclad";
-            if (root.TryGetProperty("params", out var p) && p.TryGetProperty("character", out var cProp))
-                characterName = cProp.GetString() ?? "Ironclad";
-
             int ascension = 0;
-            if (root.TryGetProperty("params", out var p2) && p2.TryGetProperty("ascension", out var aProp))
-                ascension = aProp.GetInt32();
+            if (root.TryGetProperty("params", out var p))
+            {
+                if (p.TryGetProperty("character", out var cProp))
+                    characterName = cProp.GetString() ?? "Ironclad";
+                if (p.TryGetProperty("ascension", out var aProp))
+                    ascension = aProp.GetInt32();
+            }
 
-            // Find character from ModelDb.AllCharacters
+            // Find character
             CharacterModel? charModel = null;
             foreach (var ch in ModelDb.AllCharacters)
             {
                 if (ch.GetType().Name.Equals(characterName, StringComparison.OrdinalIgnoreCase))
-                {
-                    charModel = ch;
-                    break;
-                }
+                    { charModel = ch; break; }
             }
             if (charModel == null)
             {
@@ -376,31 +600,25 @@ public static class BridgeHandler
                 return new { error = $"Character '{characterName}' not found. Available: {available}" };
             }
 
-            // Get acts
             var acts = ModelDb.Acts.ToList();
-
-            // Generate seed
             var seed = DateTime.Now.Ticks.ToString();
-
-            // Call NGame.Instance.StartNewSingleplayerRun via reflection (it's async)
-            var nGameType = Type.GetType("MegaCrit.Sts2.Core.Nodes.NGame, sts2");
-            if (nGameType == null) return new { error = "NGame type not found" };
-
-            var instanceProp = nGameType.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static);
-            var nGame = instanceProp?.GetValue(null);
-            if (nGame == null) return new { error = "NGame.Instance is null" };
-
-            var startMethod = nGameType.GetMethod("StartNewSingleplayerRun",
-                BindingFlags.Public | BindingFlags.Instance);
-            if (startMethod == null) return new { error = "StartNewSingleplayerRun method not found" };
-
             var emptyModifiers = new List<ModifierModel>();
 
-            // MUST run on main thread - Godot scene operations crash from background threads
-            MainThreadDispatcher.Enqueue(() =>
+            // Dispatch to main thread
+            var nGameType = Type.GetType("MegaCrit.Sts2.Core.Nodes.NGame, sts2");
+            var instanceProp = nGameType?.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static);
+            var startMethod = nGameType?.GetMethod("StartNewSingleplayerRun", BindingFlags.Public | BindingFlags.Instance);
+
+            if (nGameType == null || instanceProp == null || startMethod == null)
+                return new { error = "NGame API not found" };
+
+            MainThreadDispatcher.Post(() =>
             {
                 try
                 {
+                    var nGame = instanceProp.GetValue(null);
+                    if (nGame == null) { ModEntry.WriteLog("NGame.Instance is null"); return; }
+
                     var task = startMethod.Invoke(nGame, new object?[] {
                         charModel, true,
                         (IReadOnlyList<ActModel>)acts,
@@ -408,26 +626,19 @@ public static class BridgeHandler
                         seed, ascension, null
                     });
                     if (task is System.Threading.Tasks.Task t)
-                    {
                         MegaCrit.Sts2.Core.Helpers.TaskHelper.RunSafely(t);
-                    }
-                    ModEntry.WriteLog($"StartRun dispatched to main thread successfully");
+
+                    ModEntry.WriteLog($"StartRun dispatched: {characterName} asc={ascension}");
                 }
-                catch (Exception ex2)
-                {
-                    ModEntry.WriteLog($"StartRun main thread error: {ex2}");
-                }
+                catch (Exception ex2) { ModEntry.WriteLog($"StartRun main thread: {ex2.Message}"); }
             });
 
-            ModEntry.WriteLog($"StartRun: character={characterName}, ascension={ascension}, seed={seed}");
             return new { success = true, character = characterName, ascension, seed };
         }
-        catch (Exception ex)
-        {
-            ModEntry.WriteLog($"StartRun error: {ex}");
-            return new { error = ex.Message };
-        }
+        catch (Exception ex) { return new { error = ex.Message }; }
     }
+
+    // ─── Console Access ──────────────────────────────────────────────────────
 
     private static void EnsureConsoleAccess()
     {
@@ -435,53 +646,25 @@ public static class BridgeHandler
 
         try
         {
-            // NDevConsole has a private static _instance field and a private _devConsole field
             var nDevConsoleType = Type.GetType("MegaCrit.Sts2.Core.Nodes.Debug.NDevConsole, sts2");
-            if (nDevConsoleType != null)
-            {
-                // Get the static _instance field
-                var instanceField = nDevConsoleType.GetField("_instance",
-                    BindingFlags.NonPublic | BindingFlags.Static);
-                var nDevConsole = instanceField?.GetValue(null);
+            if (nDevConsoleType == null) return;
 
-                if (nDevConsole != null)
-                {
-                    ModEntry.WriteLog($"Found NDevConsole instance: {nDevConsole.GetType().Name}");
+            var instanceField = nDevConsoleType.GetField("_instance",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            var nDevConsole = instanceField?.GetValue(null);
+            if (nDevConsole == null) return;
 
-                    // Get the private _devConsole field
-                    var consoleField = nDevConsoleType.GetField("_devConsole",
-                        BindingFlags.NonPublic | BindingFlags.Instance);
-                    if (consoleField != null)
-                    {
-                        _devConsole = consoleField.GetValue(nDevConsole);
-                        ModEntry.WriteLog($"Found _devConsole: {_devConsole?.GetType().Name ?? "null"}");
-                    }
-                    else
-                    {
-                        ModEntry.WriteLog("_devConsole field not found on NDevConsole");
-                    }
-                }
-                else
-                {
-                    ModEntry.WriteLog("NDevConsole._instance is null (console not created yet)");
-                }
-            }
-            else
-            {
-                ModEntry.WriteLog("NDevConsole type not found");
-            }
+            var consoleField = nDevConsoleType.GetField("_devConsole",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+            _devConsole = consoleField?.GetValue(nDevConsole);
 
             if (_devConsole != null)
             {
                 _processCommandMethod = _devConsole.GetType().GetMethod("ProcessCommand",
                     BindingFlags.Public | BindingFlags.Instance,
                     null, new[] { typeof(string) }, null);
-                ModEntry.WriteLog($"ProcessCommand method found: {_processCommandMethod != null}");
             }
         }
-        catch (Exception ex)
-        {
-            ModEntry.WriteLog($"EnsureConsoleAccess error: {ex}");
-        }
+        catch (Exception ex) { ModEntry.WriteLog($"Console access error: {ex.Message}"); }
     }
 }
