@@ -2119,6 +2119,126 @@ class ModGenerator:
             ],
         }
 
+    def generate_floating_panel(
+        self,
+        mod_namespace: str,
+        class_name: str,
+        mod_id: str = "mymod",
+        panel_title: str = "Info Panel",
+        initial_content: str = "Panel content here.",
+        hotkey: str = "F7",
+        fade_duration: str = "0.15",
+        panel_width: str = "280",
+        offset_x: str = "20",
+        offset_y: str = "15",
+        border_color: str = "0.6f, 0.5f, 1f, 0.9f",
+        header_color: str = "0.7f, 0.6f, 1f",
+        inject_target: str = "NCombatRoom",
+    ) -> dict:
+        """Generate a mouse-following info panel with BBCode rich text and fade animation."""
+        source = _load_template("floating_panel_template").format(
+            namespace=mod_namespace,
+            class_name=class_name,
+            mod_id=mod_id,
+            panel_title=panel_title,
+            initial_content=initial_content,
+            hotkey=hotkey,
+            fade_duration=fade_duration,
+            panel_width=panel_width,
+            offset_x=offset_x,
+            offset_y=offset_y,
+            border_color=border_color,
+            header_color=header_color,
+            inject_target=inject_target,
+            patch_target=inject_target,
+        )
+        return {
+            "source": source,
+            "file_name": f"{class_name}.cs",
+            "folder": "Code/UI",
+            "notes": [
+                f"Toggle with {hotkey}. Follows mouse cursor.",
+                f"Auto-injects into {inject_target} via Harmony patch.",
+                f"Call {class_name}.Instance.SetContent(header, bbcodeBody) to update.",
+            ],
+        }
+
+    def generate_animated_bar(
+        self,
+        mod_namespace: str,
+        class_name: str,
+        mod_id: str = "mymod",
+        bar_label: str = "Health",
+        bar_width: str = "200",
+        bar_height: str = "20",
+        color_low: str = "0.9f, 0.2f, 0.15f",
+        color_high: str = "0.2f, 0.85f, 0.3f",
+        pulse_enabled: str = "true",
+        inject_target: str = "NCombatRoom",
+    ) -> dict:
+        """Generate an animated progress bar with smooth tweens, color gradients, and pulse effect."""
+        source = _load_template("animated_bar_template").format(
+            namespace=mod_namespace,
+            class_name=class_name,
+            mod_id=mod_id,
+            bar_label=bar_label,
+            bar_width=bar_width,
+            bar_height=bar_height,
+            color_low=color_low,
+            color_high=color_high,
+            pulse_enabled=pulse_enabled,
+            inject_target=inject_target,
+            patch_target=inject_target,
+        )
+        return {
+            "source": source,
+            "file_name": f"{class_name}.cs",
+            "folder": "Code/UI",
+            "notes": [
+                f"Call {class_name}.Instance.SetValue(current, max) to animate.",
+                f"Auto-injects into {inject_target} via Harmony patch.",
+                "Pulses when value drops below 30%.",
+                "Flashes white on value decrease.",
+            ],
+        }
+
+    def generate_scrollable_list(
+        self,
+        mod_namespace: str,
+        class_name: str,
+        mod_id: str = "mymod",
+        list_title: str = "Item List",
+        hotkey: str = "F9",
+        panel_width: str = "250",
+        border_color: str = "0.5f, 0.7f, 0.9f, 0.7f",
+        header_color: str = "0.5f, 0.8f, 1f",
+        inject_target: str = "NCombatRoom",
+    ) -> dict:
+        """Generate a toggleable scrollable list panel with color-coded entries and slide animation."""
+        source = _load_template("scrollable_list_template").format(
+            namespace=mod_namespace,
+            class_name=class_name,
+            mod_id=mod_id,
+            list_title=list_title,
+            hotkey=hotkey,
+            panel_width=panel_width,
+            border_color=border_color,
+            header_color=header_color,
+            inject_target=inject_target,
+            patch_target=inject_target,
+        )
+        return {
+            "source": source,
+            "file_name": f"{class_name}.cs",
+            "folder": "Code/UI",
+            "notes": [
+                f"Toggle with {hotkey}. Slides in from the right.",
+                f"Call {class_name}.Instance.AddItem(text, color, badge) to add entries.",
+                f"Call {class_name}.Instance.ClearItems() to reset.",
+                f"Auto-injects into {inject_target} via Harmony patch.",
+            ],
+        }
+
     def generate_transpiler_patch(
         self,
         mod_namespace: str,

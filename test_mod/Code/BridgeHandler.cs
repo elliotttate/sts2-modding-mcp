@@ -21,6 +21,10 @@ using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.GameActions;
 using System.Runtime.Loader;
 using HarmonyLib;
+using MegaCrit.Sts2.Core.Nodes.Screens;
+using MegaCrit.Sts2.Core.Nodes.Screens.Map;
+using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
+using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
 
 namespace MCPTest;
 
@@ -980,6 +984,39 @@ public static class BridgeHandler
         catch (Exception ex) { return new { error = ex.Message }; }
     }
 
+    private static object DiscardPotion(JsonElement p)
+    {
+        try
+        {
+            var potionIndex = p.TryGetProperty("potion_index", out var pi) ? pi.GetInt32() : 0;
+
+            if (!RunManager.Instance.IsInProgress)
+                return new { error = "No run in progress" };
+
+            var state = RunManager.Instance.DebugOnlyGetState();
+            var player = LocalContext.GetMe(state);
+            if (player == null) return new { error = "No player" };
+
+            var potions = player.Potions.ToList();
+            if (potionIndex < 0 || potionIndex >= potions.Count)
+                return new { error = $"Potion index {potionIndex} out of range (have {potions.Count})" };
+
+            var potion = potions[potionIndex];
+            if (potion == null)
+                return new { error = $"Potion slot {potionIndex} is empty" };
+
+            var potionName = potion.GetType().Name;
+
+            EnsureConsoleAccess();
+            if (_processCommandMethod != null && _devConsole != null)
+                _processCommandMethod.Invoke(_devConsole, new object[] { $"potion discard {potionIndex}" });
+
+            ModEntry.WriteLog($"[DiscardPotion] {potionName} index={potionIndex}");
+            return new { success = true, potion = potionName, potion_index = potionIndex };
+        }
+        catch (Exception ex) { return new { error = ex.Message }; }
+    }
+
     // ─── Event Choice ───────────────────────────────────────────────────────
 
     private static object MakeEventChoice(JsonElement root)
@@ -1118,6 +1155,114 @@ public static class BridgeHandler
         catch (Exception ex) { return new { error = ex.Message }; }
     }
 
+    // ─── Overlay-Aware Dismiss Handlers ─────────────────────────────────────
+
+    private static object DismissRewardScreen()
+    {
+        try
+        {
+            var overlay = NOverlayStack.Instance?.Peek();
+            if (overlay is NRewardsScreen rewardsScreen)
+            {
+                // Try the proceed button first
+                var proceedBtn = rewardsScreen.GetNodeOrNull<NButton>("%ProceedButton");
+                if (proceedBtn == null) proceedBtn = rewardsScreen.GetNodeOrNull<NButton>("ProceedButton");
+                if (proceedBtn == null)
+                {
+                    // Search all NButton descendants for one named Proceed/Skip
+                    foreach (var child in GetAllDescendants(rewardsScreen))
+                    {
+                        if (child is NButton btn && btn.IsVisibleInTree())
+                        {
+                            var n = btn.Name.ToString().ToLower();
+                            if (n.Contains("proceed") || n.Contains("skip") || n.Contains("continue"))
+                            {
+                                proceedBtn = btn;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (proceedBtn != null && proceedBtn.IsVisibleInTree())
+                {
+                    proceedBtn.ForceClick();
+                    return new { success = true, action = "reward_dismiss", invoked = "overlay:ForceClick(ProceedButton)" };
+                }
+            }
+
+            // Fallback: try console
+            EnsureConsoleAccess();
+            if (_processCommandMethod != null && _devConsole != null)
+            {
+                _processCommandMethod.Invoke(_devConsole, new object[] { "skip" });
+                return new { success = true, action = "reward_dismiss", invoked = "console:skip" };
+            }
+
+            return new { success = false, error = "Could not find proceed/skip button on reward screen" };
+        }
+        catch (Exception ex) { return new { error = ex.Message }; }
+    }
+
+    private static object DismissCardSelectionScreen()
+    {
+        try
+        {
+            var overlay = NOverlayStack.Instance?.Peek();
+
+            // NChooseACardSelectionScreen has a "SkipButton" child
+            if (overlay is Godot.Node overlayNode)
+            {
+                var skipBtn = overlayNode.GetNodeOrNull<NClickableControl>("SkipButton");
+                if (skipBtn == null) skipBtn = overlayNode.GetNodeOrNull<NClickableControl>("%SkipButton");
+                if (skipBtn == null)
+                {
+                    foreach (var child in GetAllDescendants(overlayNode))
+                    {
+                        if (child is NClickableControl ctrl && ctrl.IsVisibleInTree())
+                        {
+                            var n = ctrl.Name.ToString().ToLower();
+                            if (n.Contains("skip"))
+                            {
+                                skipBtn = ctrl;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (skipBtn != null && skipBtn.IsVisibleInTree())
+                {
+                    skipBtn.ForceClick();
+                    return new { success = true, action = "card_skip", invoked = "overlay:ForceClick(SkipButton)" };
+                }
+            }
+
+            // Fallback: console skip
+            EnsureConsoleAccess();
+            if (_processCommandMethod != null && _devConsole != null)
+            {
+                _processCommandMethod.Invoke(_devConsole, new object[] { "skip" });
+                return new { success = true, action = "card_skip", invoked = "console:skip" };
+            }
+
+            return new { success = false, error = "Could not find skip button on card selection screen" };
+        }
+        catch (Exception ex) { return new { error = ex.Message }; }
+    }
+
+    private static List<Godot.Node> GetAllDescendants(Godot.Node root)
+    {
+        var result = new List<Godot.Node>();
+        var stack = new Stack<Godot.Node>();
+        foreach (var child in root.GetChildren()) stack.Push(child);
+        while (stack.Count > 0)
+        {
+            var node = stack.Pop();
+            result.Add(node);
+            foreach (var child in node.GetChildren()) stack.Push(child);
+        }
+        return result;
+    }
+
     // ─── Generic Actions / Diagnostics ─────────────────────────────────────
 
     private static object ExecuteAction(JsonElement root)
@@ -1139,8 +1284,7 @@ public static class BridgeHandler
                 "event_option" or "make_event_choice" => MakeEventChoice(root),
                 "event_proceed" => ProceedCurrentScreen("event_proceed", "proceed", "continue"),
                 "reward_select" or "take_reward" or "claim_reward" => ExecuteRewardSelection(p),
-                "reward_proceed" => ProceedCurrentScreen("reward_proceed", "proceed", "continue"),
-                "reward_skip" => SkipCurrentScreen("reward_skip", "skip"),
+                "reward_proceed" or "reward_skip" => DismissRewardScreen(),
                 "shop_buy" => ExecuteShopAction(MapShopBuyAction(p), p.TryGetProperty("index", out var si) ? si.GetInt32() : 0),
                 "shop_proceed" => ProceedCurrentScreen("shop_proceed", "leave", "proceed"),
                 "rest_option" => ExecuteRestAction(p.TryGetProperty("choice", out var rc) ? (rc.GetString() ?? "rest") : "rest"),
@@ -1149,7 +1293,8 @@ public static class BridgeHandler
                 "treasure_proceed" => ProceedCurrentScreen("treasure_proceed", "proceed", "continue", "open"),
                 "card_select" => ExecuteCardSelection(p),
                 "card_confirm" => ConfirmCurrentScreen("card_confirm", "confirm", "proceed"),
-                "card_skip" => SkipCurrentScreen("card_skip", "skip"),
+                "card_skip" => DismissCardSelectionScreen(),
+                "discard_potion" => DiscardPotion(p),
                 "proceed" => ProceedCurrentScreen("proceed", "proceed", "continue", "leave"),
                 _ => new { error = $"Unsupported action '{action}'" },
             };
@@ -1389,17 +1534,35 @@ public static class BridgeHandler
         if (state?.Map == null)
             return new { error = "No map available" };
 
-        var targetPoint = state.Map.GetAllMapPoints()
-            .FirstOrDefault(mp => mp.coord.row == row && mp.coord.col == col);
+        // Try direct NMapScreen.OnMapPointSelectedLocally for reliable travel
+        var mapScreen = MegaCrit.Sts2.Core.Nodes.Screens.Map.NMapScreen.Instance;
+        if (mapScreen != null && mapScreen.IsOpen)
+        {
+            // Find travelable NMapPoint nodes matching the target coordinates
+            var mapPoints = GetAllDescendants(mapScreen)
+                .OfType<MegaCrit.Sts2.Core.Nodes.Screens.Map.NMapPoint>()
+                .Where(mp => mp.Point?.coord.row == row && mp.Point?.coord.col == col)
+                .ToList();
 
-        if (targetPoint == null)
-            return new { error = $"Map node ({row},{col}) not found" };
+            if (mapPoints.Count > 0)
+            {
+                var target = mapPoints[0];
+                mapScreen.OnMapPointSelectedLocally(target);
+                ModEntry.WriteLog($"[NavigateMap] Direct travel to ({row},{col}) type={target.Point?.PointType}");
+                return new { success = true, row, col, type = target.Point?.PointType.ToString() ?? "Unknown", method = "direct" };
+            }
+        }
 
-        if (!TryExecuteConsoleCommand($"travel {row},{col}"))
-            return new { error = "DevConsole not available for map travel" };
+        // Fallback: console travel command
+        if (TryExecuteConsoleCommand($"travel {row},{col}"))
+        {
+            var targetPoint = state.Map.GetAllMapPoints()
+                .FirstOrDefault(mp => mp.coord.row == row && mp.coord.col == col);
+            ModEntry.WriteLog($"[NavigateMap] Console travel to ({row},{col}) type={targetPoint?.PointType}");
+            return new { success = true, row, col, type = targetPoint?.PointType.ToString() ?? "Unknown", method = "console" };
+        }
 
-        ModEntry.WriteLog($"[NavigateMap] to ({row},{col}) type={targetPoint.PointType}");
-        return new { success = true, row, col, type = targetPoint.PointType.ToString() };
+        return new { error = "Could not travel to map node" };
     }
 
     private static object ExecuteRestAction(string choice)

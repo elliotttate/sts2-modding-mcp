@@ -2,6 +2,8 @@
 
 import json
 import socket
+import sys
+import time
 from typing import Any, Optional, Sequence
 
 BRIDGE_HOST = "127.0.0.1"
@@ -97,6 +99,89 @@ def get_available_actions() -> dict:
     return send_request("get_available_actions")
 
 
+def get_full_state() -> dict:
+    """Get a compact combined game state in ONE call.
+
+    Returns: screen, screen_context (raw type name for disambiguation),
+    run info (act/floor/HP/gold), player info (deck/relics/potions),
+    combat state (if fighting), and all available actions.
+    """
+    # Available actions includes screen info already
+    actions_raw = get_available_actions()
+    actions_result = _payload(actions_raw)
+
+    screen = "UNKNOWN"
+    screen_context = None
+    if isinstance(actions_result, dict) and not actions_result.get("error"):
+        screen = actions_result.get("screen", "UNKNOWN")
+        screen_context = actions_result.get("screen_context_type")
+
+    # If get_available_actions failed, fall back to get_screen
+    if screen == "UNKNOWN":
+        screen_raw = get_screen()
+        screen_result = _payload(screen_raw)
+        screen = screen_result.get("screen", "UNKNOWN") if isinstance(screen_result, dict) else "UNKNOWN"
+
+    state: dict[str, Any] = {"screen": screen}
+    if screen_context:
+        state["screen_context"] = screen_context
+
+    # Hint for ambiguous screens
+    if screen == "CARD_SELECTION" and screen_context:
+        ctx = screen_context.lower()
+        if "reward" in ctx or "draft" in ctx:
+            state["screen_hint"] = "card_reward_pick"
+        elif "upgrade" in ctx or "smith" in ctx:
+            state["screen_hint"] = "card_upgrade"
+        elif "remove" in ctx or "purge" in ctx:
+            state["screen_hint"] = "card_remove"
+        elif "transform" in ctx:
+            state["screen_hint"] = "card_transform"
+        elif "scry" in ctx or "divination" in ctx:
+            state["screen_hint"] = "scry"
+        else:
+            state["screen_hint"] = "card_selection"
+    elif screen == "REWARD" and screen_context:
+        ctx = screen_context.lower()
+        if "boss" in ctx:
+            state["screen_hint"] = "boss_relic_reward"
+        else:
+            state["screen_hint"] = "standard_reward"
+
+    # Add run + player info if in a run
+    in_run = screen not in ("MAIN_MENU", "CHARACTER_SELECT", "UNKNOWN")
+    if in_run:
+        player_raw = get_player_state()
+        player_result = _payload(player_raw)
+        if isinstance(player_result, dict) and not player_result.get("error"):
+            state["player"] = player_result
+        else:
+            # Fallback to run state for basic info
+            run_raw = get_run_state()
+            run_result = _payload(run_raw)
+            if isinstance(run_result, dict) and not run_result.get("error"):
+                state["run"] = {
+                    k: run_result[k]
+                    for k in ("act", "floor", "hp", "max_hp", "gold", "character", "ascension", "seed")
+                    if k in run_result
+                }
+
+    # Add combat info if in combat
+    if "COMBAT" in screen and "LOADING" not in screen:
+        combat_raw = get_combat_state()
+        combat_result = _payload(combat_raw)
+        if isinstance(combat_result, dict) and not combat_result.get("error"):
+            state["combat"] = combat_result
+
+    # Available actions — the key to knowing what to do
+    if isinstance(actions_result, dict) and not actions_result.get("error"):
+        state["available_actions"] = actions_result
+    else:
+        state["available_actions"] = {"actions": [], "error": "Could not fetch actions"}
+
+    return state
+
+
 def execute_console_command(command: str) -> dict:
     return send_request("console", {"command": command})
 
@@ -183,8 +268,81 @@ def is_connected() -> bool:
         return False
 
 
+def act_and_wait(action: str, settle_timeout: float = 5.0, **params: Any) -> dict:
+    """Execute an action, wait for the game to settle, then return the new full state.
+
+    This is the recommended way to interact with the game. It combines three steps:
+    1. Execute the action via execute_action()
+    2. Wait for the screen to stabilize (animations, transitions)
+    3. Return the new full game state so you know exactly where you are
+
+    Args:
+        action: Action name (play_card, end_turn, reward_select, card_select, etc.)
+        settle_timeout: Max seconds to wait for screen to stabilize after action.
+        **params: Action-specific parameters (card_index, target_index, choice_index, etc.)
+
+    Returns:
+        Dict with: action_result (raw action response), then the full state
+        (screen, player, combat, available_actions). If the action failed,
+        includes error and still returns current state for recovery.
+    """
+    # Special-case: play_card and end_turn go via their dedicated handlers (more reliable)
+    normalized = action.strip().lower()
+    if normalized == "play_card":
+        action_result = play_card(
+            card_index=params.get("card_index", 0),
+            target_index=params.get("target_index", -1),
+        )
+    elif normalized == "end_turn":
+        action_result = end_turn()
+    elif normalized == "use_potion":
+        action_result = use_potion(
+            potion_index=params.get("potion_index", 0),
+            target_index=params.get("target_index", -1),
+        )
+    else:
+        action_result = execute_action(action, **params)
+
+    action_result = _payload(action_result)
+    action_error = action_result.get("error") if isinstance(action_result, dict) else None
+
+    # Wait for the screen to stabilize
+    deadline = time.monotonic() + settle_timeout
+    prev_screen = ""
+    stable_count = 0
+    while time.monotonic() < deadline:
+        raw = get_screen()
+        result = _payload(raw)
+        current = result.get("screen", "UNKNOWN") if isinstance(result, dict) else "UNKNOWN"
+
+        # Consider stable when same interactive screen appears twice
+        if current == prev_screen and any(s in current.upper() for s in _STABLE_SCREENS):
+            stable_count += 1
+            if stable_count >= 1:
+                break
+        else:
+            stable_count = 0
+        prev_screen = current
+        time.sleep(0.3)
+
+    # Get the new full state
+    new_state = get_full_state()
+
+    # Combine action result with new state
+    output: dict[str, Any] = {}
+    if action_error:
+        output["action_error"] = action_error
+    output["action_result"] = action_result
+    output.update(new_state)
+    return output
+
+
 def use_potion(potion_index: int, target_index: int = -1) -> dict:
     return send_request("use_potion", {"potion_index": potion_index, "target_index": target_index})
+
+
+def discard_potion(potion_index: int) -> dict:
+    return execute_action("discard_potion", potion_index=potion_index)
 
 
 def execute_action(action: str, **params: Any) -> dict:
@@ -558,3 +716,491 @@ def autoslay_configure(
     if max_floor is not None:
         params["max_floor"] = max_floor
     return send_request("autoslay_configure", params)
+
+
+# ── Navigation & Window Helpers ──────────────────────────────────────────────
+
+
+_STABLE_SCREENS = frozenset({
+    "COMBAT_PLAYER_TURN", "MAP", "EVENT", "SHOP", "REST_SITE", "TREASURE",
+    "REWARD", "CARD_SELECTION", "MAIN_MENU", "CHARACTER_SELECT", "GAME_OVER",
+    "SETTINGS", "TIMELINE",
+})
+
+# Screens where the agent needs to actively interact (not loading/transitioning)
+_INTERACTIVE_SCREENS = frozenset({
+    "COMBAT_PLAYER_TURN", "MAP", "EVENT", "SHOP", "REST_SITE", "TREASURE",
+    "REWARD", "CARD_SELECTION",
+})
+
+
+def wait_for_screen(
+    target_screen: str,
+    timeout_seconds: float = 15,
+    poll_interval: float = 0.5,
+) -> dict:
+    """Poll until the game reaches a screen matching *target_screen* (case-insensitive substring)."""
+    deadline = time.monotonic() + timeout_seconds
+    last_screen = "UNKNOWN"
+    while time.monotonic() < deadline:
+        raw = get_screen()
+        result = _payload(raw)
+        if isinstance(result, dict) and not result.get("error"):
+            last_screen = result.get("screen", "UNKNOWN")
+            if target_screen.upper() in last_screen.upper():
+                return {"success": True, "screen": last_screen}
+        time.sleep(poll_interval)
+    return {
+        "success": False,
+        "error": f"Timed out ({timeout_seconds}s) waiting for '{target_screen}', last screen: {last_screen}",
+        "last_screen": last_screen,
+    }
+
+
+def wait_until_idle(
+    timeout_seconds: float = 10,
+    poll_interval: float = 0.5,
+) -> dict:
+    """Poll until the game reaches a stable (interactive) screen."""
+    deadline = time.monotonic() + timeout_seconds
+    last_screen = "UNKNOWN"
+    while time.monotonic() < deadline:
+        raw = get_screen()
+        result = _payload(raw)
+        if isinstance(result, dict) and not result.get("error"):
+            last_screen = result.get("screen", "UNKNOWN")
+            if any(s in last_screen.upper() for s in _STABLE_SCREENS):
+                return {"success": True, "screen": last_screen}
+        time.sleep(poll_interval)
+    return {
+        "success": False,
+        "error": f"Timed out ({timeout_seconds}s) waiting for idle, last screen: {last_screen}",
+        "last_screen": last_screen,
+    }
+
+
+def focus_game_window() -> dict:
+    """Bring the Slay the Spire 2 window to the foreground (Windows only)."""
+    if sys.platform != "win32":
+        return {"success": False, "error": "focus_game_window only supported on Windows"}
+    try:
+        import ctypes
+        import ctypes.wintypes
+
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+        EnumWindows = user32.EnumWindows
+        GetWindowTextW = user32.GetWindowTextW
+        IsWindowVisible = user32.IsWindowVisible
+        SetForegroundWindow = user32.SetForegroundWindow
+        ShowWindow = user32.ShowWindow
+
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+        SW_RESTORE = 9
+        found_hwnd: list[int] = []
+
+        def _enum_callback(hwnd: int, _lp: int) -> bool:
+            if IsWindowVisible(hwnd):
+                buf = ctypes.create_unicode_buffer(256)
+                GetWindowTextW(hwnd, buf, 256)
+                title = buf.value
+                if "Slay the Spire 2" in title or "SlayTheSpire2" in title:
+                    found_hwnd.append(hwnd)
+                    return False  # stop enumeration
+            return True
+
+        EnumWindows(WNDENUMPROC(_enum_callback), 0)
+        if not found_hwnd:
+            return {"success": False, "error": "Could not find game window"}
+        hwnd = found_hwnd[0]
+        ShowWindow(hwnd, SW_RESTORE)
+        # Alt-key trick to allow SetForegroundWindow from background process
+        user32.keybd_event(0x12, 0, 0, ctypes.wintypes.WPARAM(0))  # Alt down
+        SetForegroundWindow(hwnd)
+        user32.keybd_event(0x12, 0, 2, ctypes.wintypes.WPARAM(0))  # Alt up
+        return {"success": True, "hwnd": hwnd}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+def click_in_game(rel_x: float, rel_y: float) -> dict:
+    """Click at a relative position (0.0-1.0) within the game window (Windows only).
+
+    Useful for dismissing UI overlays that the bridge console commands can't reach.
+    """
+    if sys.platform != "win32":
+        return {"success": False, "error": "click_in_game only supported on Windows"}
+    try:
+        import ctypes
+        import ctypes.wintypes
+
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+
+        class RECT(ctypes.Structure):
+            _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                        ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+        # Find the game window
+        focus_result = focus_game_window()
+        if not focus_result.get("success"):
+            return focus_result
+
+        hwnd = focus_result["hwnd"]
+        rect = RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+
+        x = rect.left + int((rect.right - rect.left) * rel_x)
+        y = rect.top + int((rect.bottom - rect.top) * rel_y)
+
+        user32.SetCursorPos(x, y)
+        time.sleep(0.15)
+        user32.mouse_event(0x0002, 0, 0, 0, ctypes.wintypes.WPARAM(0))  # LEFT_DOWN
+        user32.mouse_event(0x0004, 0, 0, 0, ctypes.wintypes.WPARAM(0))  # LEFT_UP
+        return {"success": True, "x": x, "y": y}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+def navigate_to_combat(
+    timeout: int = 60,
+    neow_choice_index: int = 0,
+    focus_first: bool = True,
+) -> dict:
+    """Navigate from any screen to the first combat encounter.
+
+    Handles Neow events, card selections, reward screens, map navigation,
+    and other intermediate screens automatically.
+    """
+    if focus_first:
+        focus_game_window()
+        time.sleep(0.3)
+
+    deadline = time.monotonic() + timeout
+    steps_taken = 0
+    last_screen = "UNKNOWN"
+    stuck_count = 0
+    prev_screen = ""
+
+    while time.monotonic() < deadline:
+        # Ensure game window has focus for scene transitions
+        focus_game_window()
+
+        raw = get_screen()
+        result = _payload(raw)
+        if isinstance(result, dict) and result.get("error"):
+            time.sleep(1)
+            continue
+
+        screen = result.get("screen", "UNKNOWN").upper() if isinstance(result, dict) else "UNKNOWN"
+        last_screen = screen
+
+        # Detect being stuck on the same screen
+        if screen == prev_screen:
+            stuck_count += 1
+            if stuck_count > 8:
+                return {
+                    "success": False,
+                    "error": f"Stuck on screen '{screen}' after {steps_taken} steps",
+                    "steps_taken": steps_taken,
+                    "last_screen": screen,
+                }
+        else:
+            stuck_count = 0
+        prev_screen = screen
+
+        # ── Already in combat ──
+        if "COMBAT" in screen and "LOADING" not in screen:
+            return {"success": True, "screen": screen, "steps_taken": steps_taken}
+
+        # ── Loading / transitioning ──
+        if "LOADING" in screen or "TRANSITION" in screen:
+            time.sleep(1)
+            continue
+
+        # ── No run in progress ──
+        if "MAIN_MENU" in screen or "CHARACTER_SELECT" in screen:
+            return {
+                "success": False,
+                "error": "No run in progress — start a run first with bridge_start_run",
+                "steps_taken": steps_taken,
+                "last_screen": screen,
+            }
+
+        # ── Event screen (Neow or other) ──
+        if "EVENT" in screen:
+            make_event_choice(neow_choice_index)
+            time.sleep(2)
+            # Check if we need to proceed or dismiss a sub-screen
+            check = _payload(get_screen()).get("screen", "").upper()
+            if "EVENT" in check:
+                # Click Proceed button at bottom center
+                click_in_game(0.30, 0.92)
+                time.sleep(2)
+            steps_taken += 1
+            continue
+
+        # ── Card selection screen ──
+        if "CARD" in screen or "TRANSFORM" in screen or "DECK" in screen:
+            card_skip()
+            time.sleep(1.5)
+            check = _payload(get_screen()).get("screen", "").upper()
+            if "CARD" in check or "TRANSFORM" in check:
+                click_in_game(0.50, 0.83)
+                time.sleep(1.5)
+            steps_taken += 1
+            continue
+
+        # ── Reward screen ──
+        if "REWARD" in screen:
+            reward_proceed()
+            time.sleep(1.5)
+            check = _payload(get_screen()).get("screen", "").upper()
+            if "REWARD" in check:
+                click_in_game(0.85, 0.77)
+                time.sleep(1.5)
+            steps_taken += 1
+            continue
+
+        # ── Treasure screen ──
+        if "TREASURE" in screen:
+            treasure_proceed()
+            time.sleep(1)
+            check = _payload(get_screen()).get("screen", "").upper()
+            if "TREASURE" in check:
+                click_in_game(0.50, 0.92)
+                time.sleep(1)
+            steps_taken += 1
+            continue
+
+        # ── Rest site ──
+        if "REST" in screen:
+            rest_site_choice("rest")
+            time.sleep(1)
+            rest_site_proceed()
+            steps_taken += 1
+            time.sleep(1)
+            continue
+
+        # ── Shop ──
+        if "SHOP" in screen:
+            shop_proceed()
+            steps_taken += 1
+            time.sleep(1)
+            continue
+
+        # ── Map screen — navigate to a combat node ──
+        if "MAP" in screen:
+            map_state = _payload(get_map_state())
+            if isinstance(map_state, dict) and not map_state.get("error"):
+                nodes = map_state.get("nodes", [])
+                target = None
+                fallback = None
+                for node in nodes:
+                    if not node.get("available"):
+                        continue
+                    if fallback is None:
+                        fallback = node
+                    ntype = (node.get("type") or "").lower()
+                    if ntype in ("monster", "elite", "boss", "combat"):
+                        target = node
+                        break
+                chosen = target or fallback
+                if chosen:
+                    navigate_map(chosen["row"], chosen["col"])
+                    time.sleep(2)
+                    # Check if we transitioned
+                    check = _payload(get_screen()).get("screen", "").upper()
+                    if "MAP" in check:
+                        # Bridge navigate worked at data level but scene needs click
+                        # Try clicking Proceed if it appeared
+                        click_in_game(0.30, 0.92)
+                        time.sleep(2)
+                    steps_taken += 1
+                    continue
+            # Fallback: console fight
+            execute_console_command("fight")
+            time.sleep(2)
+            check = _payload(get_screen()).get("screen", "").upper()
+            if "MAP" in check:
+                click_in_game(0.30, 0.92)
+                time.sleep(2)
+            steps_taken += 1
+            continue
+
+        # ── Game over ──
+        if "GAME_OVER" in screen:
+            return {
+                "success": False,
+                "error": "Run ended (game over)",
+                "steps_taken": steps_taken,
+                "last_screen": screen,
+            }
+
+        # ── Unknown screen — try generic proceed ──
+        proceed()
+        steps_taken += 1
+        time.sleep(1)
+
+    return {
+        "success": False,
+        "error": f"Timed out after {timeout}s",
+        "steps_taken": steps_taken,
+        "last_screen": last_screen,
+    }
+
+
+def auto_proceed(
+    skip_cards: bool = True,
+    skip_rewards: bool = False,
+    timeout_seconds: float = 15,
+) -> dict:
+    """Automatically advance past non-combat screens. Returns full state when done.
+
+    Handles the full chain: loading → event → card selection → rewards → treasure →
+    rest → shop → MENU_* screens. Stops when it reaches a screen requiring a decision.
+
+    Returns the new full game state (via get_full_state) plus what steps were taken
+    and what kind of decision is needed (if any).
+    """
+    deadline = time.monotonic() + timeout_seconds
+    steps: list[str] = []
+    prev_screen = ""
+    stuck_count = 0
+
+    while time.monotonic() < deadline:
+        raw = get_screen()
+        result = _payload(raw)
+        screen = (result.get("screen", "UNKNOWN") if isinstance(result, dict) else "UNKNOWN").upper()
+
+        # Stuck detection — same screen 5+ iterations means we can't proceed
+        if screen == prev_screen:
+            stuck_count += 1
+            if stuck_count >= 5:
+                state = get_full_state()
+                state["steps"] = steps
+                state["stuck"] = True
+                state["error"] = f"Stuck on {screen} after {len(steps)} steps — needs manual interaction"
+                return state
+        else:
+            stuck_count = 0
+        prev_screen = screen
+
+        # ── Decision-required screens — stop and return full state ──
+        if "COMBAT" in screen and "LOADING" not in screen:
+            state = get_full_state()
+            state["steps"] = steps
+            state["needs_decision"] = "combat"
+            return state
+
+        if screen == "MAP":
+            state = get_full_state()
+            state["steps"] = steps
+            state["needs_decision"] = "map_navigation"
+            return state
+
+        # ── Loading / transition — wait ──
+        if "LOADING" in screen or "TRANSITION" in screen or screen == "UNKNOWN":
+            time.sleep(0.5)
+            continue
+
+        # ── Enemy turn — wait for our turn ──
+        if "ENEMY" in screen:
+            time.sleep(0.5)
+            continue
+
+        # ── Terminal screens ──
+        if "GAME_OVER" in screen:
+            state = get_full_state()
+            state["steps"] = steps
+            state["error"] = "Run ended (game over)"
+            return state
+        if "MAIN_MENU" in screen or "CHARACTER_SELECT" in screen:
+            state = get_full_state()
+            state["steps"] = steps
+            state["error"] = "No run in progress"
+            return state
+
+        # ── Card selection ──
+        if "CARD_SELECTION" in screen or ("CARD" in screen and "SELECT" in screen):
+            if skip_cards:
+                card_skip()
+                steps.append("card_skip")
+                time.sleep(1)
+                # Card skip might not work (e.g. mandatory selection) — try confirm too
+                confirm_raw = get_screen()
+                confirm_result = _payload(confirm_raw)
+                still_on = (confirm_result.get("screen", "") if isinstance(confirm_result, dict) else "").upper()
+                if "CARD" in still_on and "SELECT" in still_on:
+                    card_confirm()
+                    steps.append("card_confirm (skip failed, trying confirm)")
+                    time.sleep(1)
+            else:
+                state = get_full_state()
+                state["steps"] = steps
+                state["needs_decision"] = "card_selection"
+                return state
+            continue
+
+        # ── Reward screen ──
+        if "REWARD" in screen:
+            if skip_rewards:
+                reward_proceed()
+                steps.append("reward_proceed")
+                time.sleep(1)
+            else:
+                state = get_full_state()
+                state["steps"] = steps
+                state["needs_decision"] = "reward_selection"
+                return state
+            continue
+
+        # ── Treasure ──
+        if "TREASURE" in screen:
+            treasure_proceed()
+            steps.append("treasure_proceed")
+            time.sleep(1)
+            continue
+
+        # ── Rest site ──
+        if "REST" in screen:
+            rest_site_choice("rest")
+            steps.append("rest_choice:rest")
+            time.sleep(1)
+            rest_site_proceed()
+            steps.append("rest_proceed")
+            time.sleep(1)
+            continue
+
+        # ── Shop ──
+        if "SHOP" in screen or "MERCHANT" in screen:
+            shop_proceed()
+            steps.append("shop_proceed")
+            time.sleep(1)
+            continue
+
+        # ── Event ──
+        if "EVENT" in screen:
+            make_event_choice(0)
+            steps.append("event_choice:0")
+            time.sleep(1.5)
+            proceed()
+            steps.append("proceed")
+            time.sleep(1)
+            continue
+
+        # ── Settings / Timeline / other menus ──
+        if screen in ("SETTINGS", "TIMELINE") or screen.startswith("MENU_"):
+            proceed()
+            steps.append(f"proceed ({screen})")
+            time.sleep(1)
+            continue
+
+        # ── Fallback — generic proceed for any unknown screen ──
+        proceed()
+        steps.append(f"proceed (unknown: {screen})")
+        time.sleep(1)
+
+    # Timed out — return current state anyway
+    state = get_full_state()
+    state["steps"] = steps
+    state["error"] = f"Timed out after {timeout_seconds}s"
+    return state

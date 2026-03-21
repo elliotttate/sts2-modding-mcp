@@ -64,6 +64,21 @@ public static class ModEntry
             _harmony.PatchAll();
             WriteLog("Harmony patches applied.");
 
+            // Prevent Godot from throttling when window loses focus.
+            // By default Godot 4 sleeps heavily when unfocused, blocking bridge transitions.
+            try
+            {
+                // Disable low processor mode so the game keeps running at full speed in background
+                Godot.OS.LowProcessorUsageMode = false;
+                // Set unfocused FPS to something reasonable (default is often 0 or very low)
+                Godot.Engine.MaxFps = 0; // uncapped
+                WriteLog("Configured background processing (LowProcessorUsageMode=false).");
+            }
+            catch (Exception bgEx)
+            {
+                WriteLog($"Background processing setup: {bgEx.Message}");
+            }
+
             StartBridgeServer();
             WriteLog("Bridge server started on port 21337.");
 

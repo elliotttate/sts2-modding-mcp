@@ -819,9 +819,18 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="bridge_get_screen",
             description=(
-                "Get current game screen: MAIN_MENU, CHARACTER_SELECT, MAP, COMBAT_PLAYER_TURN, "
-                "COMBAT_ENEMY_TURN, COMBAT_LOADING, EVENT, SHOP, REST_SITE, TREASURE, REWARD, "
-                "CARD_SELECTION, GAME_OVER, LOADING, SETTINGS, TIMELINE."
+                "Get current game screen. Possible values:\n"
+                "  COMBAT_PLAYER_TURN — your turn, play cards or end turn\n"
+                "  COMBAT_ENEMY_TURN — wait for enemies to finish\n"
+                "  MAP — choose a path node to travel to\n"
+                "  EVENT — choose an event option\n"
+                "  REWARD — claim rewards (gold/card/relic/potion) then proceed\n"
+                "  CARD_SELECTION — pick/skip a card (reward, upgrade, remove)\n"
+                "  SHOP — buy items or leave\n"
+                "  REST_SITE — rest/smith/recall then proceed\n"
+                "  TREASURE — pick relic then proceed\n"
+                "  MAIN_MENU, CHARACTER_SELECT, GAME_OVER, LOADING, SETTINGS, TIMELINE\n"
+                "Tip: Use bridge_get_full_state instead for screen + actions in one call."
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
@@ -862,11 +871,109 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="bridge_get_available_actions",
             description=(
-                "Get all currently legal actions across combat and in-run screens: "
-                "combat cards/end turn, map travel, event options, rewards, shops, rest sites, "
-                "treasure, and card selection overlays."
+                "Get all currently legal actions for the current screen. Returns a list of action "
+                "objects with action name, indices, labels, and types. Use this to know EXACTLY "
+                "what you can do right now. Each action maps to a bridge tool:\n"
+                "  - play_card → bridge_play_card(card_index, target_index)\n"
+                "  - end_turn → bridge_end_turn\n"
+                "  - travel → bridge_navigate_map(row, col)\n"
+                "  - event_option → bridge_make_event_choice(choice_index)\n"
+                "  - reward_select → bridge_reward_select(reward_index)\n"
+                "  - reward_proceed → bridge_reward_proceed\n"
+                "  - card_select → bridge_card_select(card_index)\n"
+                "  - card_skip → bridge_card_skip\n"
+                "  - card_confirm → bridge_card_confirm\n"
+                "  - treasure_pick → bridge_treasure_pick(treasure_index)\n"
+                "  - treasure_proceed → bridge_treasure_proceed\n"
+                "  - shop_buy → bridge_shop_buy(item_type, index)\n"
+                "  - shop_proceed → bridge_shop_proceed\n"
+                "  - rest_option → bridge_rest_site_choice(choice)\n"
+                "  - rest_proceed → bridge_rest_site_proceed\n"
+                "Call this first when unsure what to do on the current screen."
             ),
             inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_get_full_state",
+            description=(
+                "Get compact combined game state in ONE call: current screen, run info "
+                "(act/floor/HP/gold/character), combat state (if in combat), and all available "
+                "actions. This is the best starting point — call this to understand where the "
+                "game is and what you can do. The available_actions list tells you exactly which "
+                "bridge tools to call next."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_auto_proceed",
+            description=(
+                "Automatically advance past non-combat screens (rewards, card selections, "
+                "treasure, rest sites, shops, events, loading). Handles screen transitions "
+                "and waits for stability. Stops and returns when it reaches a screen that "
+                "needs a decision: combat (play cards), map (choose path), or optionally "
+                "reward/card selection screens. Use this when you don't care about intermediate "
+                "screens and just want to get to the next decision point."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "skip_cards": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Auto-skip card selection screens (set false to stop and choose)",
+                    },
+                    "skip_rewards": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Auto-skip reward screens (set true to skip all rewards)",
+                    },
+                    "timeout_seconds": {
+                        "type": "number",
+                        "default": 15,
+                        "description": "Max seconds to wait",
+                    },
+                },
+            },
+        ),
+        types.Tool(
+            name="bridge_act_and_wait",
+            description=(
+                "Execute any action, wait for the game to settle, then return the new full state. "
+                "This is the RECOMMENDED way to interact with the game — it combines action + wait + "
+                "state read in one call so you always know where you are after acting.\n"
+                "Actions: play_card, end_turn, use_potion, discard_potion, event_option, "
+                "reward_select, reward_proceed, card_select, card_skip, card_confirm, "
+                "treasure_pick, treasure_proceed, shop_buy, shop_proceed, rest_option, "
+                "rest_proceed, map_travel, proceed.\n"
+                "Returns: action_result + full game state (screen, player, combat, available_actions)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "Action name (e.g. play_card, end_turn, reward_select, card_skip)",
+                    },
+                    "card_index": {"type": "integer", "description": "For play_card / card_select"},
+                    "target_index": {"type": "integer", "description": "For play_card / use_potion (enemy index)"},
+                    "choice_index": {"type": "integer", "description": "For event_option"},
+                    "reward_index": {"type": "integer", "description": "For reward_select"},
+                    "treasure_index": {"type": "integer", "description": "For treasure_pick"},
+                    "potion_index": {"type": "integer", "description": "For use_potion / discard_potion"},
+                    "item_type": {"type": "string", "description": "For shop_buy: card/relic/potion/remove"},
+                    "index": {"type": "integer", "description": "Generic index (shop items)"},
+                    "choice": {"type": "string", "description": "For rest_option: rest/smith/recall"},
+                    "row": {"type": "integer", "description": "For map_travel"},
+                    "col": {"type": "integer", "description": "For map_travel"},
+                    "confirm": {"type": "boolean", "description": "Auto-confirm after card_select"},
+                    "settle_timeout": {
+                        "type": "number",
+                        "default": 5.0,
+                        "description": "Max seconds to wait for screen to stabilize after action",
+                    },
+                },
+                "required": ["action"],
+            },
         ),
         types.Tool(
             name="bridge_start_run",
@@ -2157,8 +2264,8 @@ async def list_tools() -> list[types.Tool]:
             name="bridge_wait_for_screen",
             description=(
                 "Wait until the game reaches a specific screen (case-insensitive substring match). "
-                "Screen names: MAIN_MENU, MAP, COMBAT_PLAYER_TURN, COMBAT_ENEMY_TURN, EVENT, "
-                "SHOP, REST_SITE, TREASURE, REWARD, CARD_SELECTION, GAME_OVER."
+                "Use after actions that trigger screen transitions (e.g. after navigate_map, wait for COMBAT). "
+                "Tip: Use bridge_auto_proceed instead if you just want to get past intermediate screens."
             ),
             inputSchema={
                 "type": "object",
@@ -3098,6 +3205,30 @@ async def _handle_tool(name: str, args: dict):
     elif name == "bridge_get_available_actions":
         from . import bridge_client
         return await _call_bridge(bridge_client.get_available_actions)
+
+    elif name == "bridge_get_full_state":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.get_full_state)
+
+    elif name == "bridge_auto_proceed":
+        from . import bridge_client
+        return await _call_bridge(
+            bridge_client.auto_proceed,
+            skip_cards=args.get("skip_cards", True),
+            skip_rewards=args.get("skip_rewards", False),
+            timeout_seconds=args.get("timeout_seconds", 15),
+        )
+
+    elif name == "bridge_act_and_wait":
+        from . import bridge_client
+        action = args.pop("action")
+        settle_timeout = args.pop("settle_timeout", 5.0)
+        return await _call_bridge(
+            bridge_client.act_and_wait,
+            action=action,
+            settle_timeout=settle_timeout,
+            **args,
+        )
 
     elif name == "bridge_play_card":
         from . import bridge_client
