@@ -2,7 +2,7 @@
 
 ## What this project is
 
-An MCP server for Slay the Spire 2 modding. It decompiles the game's C# assemblies and Godot PCK, indexes 3,015+ entities and 136 hooks, and exposes tools for querying game data, generating mod code, building/deploying, and driving in-game playtests.
+An MCP server for Slay the Spire 2 modding. It decompiles the game's C# assemblies and Godot PCK, indexes 3,048+ entities and 144 hooks, and exposes tools for querying game data, generating mod code, building/deploying, and driving in-game playtests.
 
 ## Quick reference
 
@@ -17,14 +17,15 @@ An MCP server for Slay the Spire 2 modding. It decompiles the game's C# assembli
 sts2mcp/
   server.py          — MCP tool definitions + handler dispatch
   mod_gen.py         — Code generators (loads templates from templates/)
-  game_data.py       — Decompiled source indexer (entities, hooks, console commands)
-  analysis.py        — Code intelligence (patch suggestions, call graphs, validation)
+  game_data.py       — Decompiled source indexer (loads Roslyn JSON index or falls back to regex)
+  analysis.py        — Code intelligence (call graphs, patch suggestions, validation)
   bridge_client.py   — TCP JSON-RPC client to in-game MCPTest mod (port 21337)
   pck_builder.py     — Pure Python Godot PCK builder
   character_assets.py — Character asset scaffolding
   templates/         — 43 C# template files (*.cs.tpl) with {placeholder} format strings
   docs/guides/       — 29 modding guide markdown files (loaded by get_modding_guide)
   docs/baselib/      — 15 BaseLib reference markdown files
+tools/roslyn_analyzer/ — C# Roslyn-based source analyzer (outputs roslyn_index.json)
 test_mod/            — MCPTest bridge mod (C# source, runs inside the game)
 tests/               — pytest suite (generators, analysis, bridge, server, integration)
 decompiled/          — Decompiled C# source from sts2.dll (gitignored, ~23MB)
@@ -67,6 +68,27 @@ pytest tests/test_analysis.py    # code intelligence (needs decompiled/)
 - `STS2_GAME_DIR` — Game install path (default: `E:\SteamLibrary\steamapps\common\Slay the Spire 2`)
 - `STS2_DECOMPILED_DIR` — Decompiled source path (default: `./decompiled`)
 - `GDRE_TOOLS_PATH` — Path to gdre_tools binary (default: `./tools/gdre_tools.exe`)
+
+## Roslyn analyzer
+
+The `tools/roslyn_analyzer/` directory contains a C# .NET 9.0 console app that uses `Microsoft.CodeAnalysis.CSharp` to parse all decompiled `.cs` files into Roslyn syntax trees and extract structured data: classes, methods, properties, fields, constructors, attributes, invocations, type references, enums, and inheritance chains. Output is `decompiled/roslyn_index.json` (~17MB).
+
+```bash
+# Build (one-time, requires .NET SDK)
+cd tools/roslyn_analyzer && dotnet restore --configfile nuget.config && dotnet build -c Release --no-restore
+
+# Run (regenerate after decompiling a new game version)
+dotnet tools/roslyn_analyzer/bin/Release/net9.0/RoslynAnalyzer.dll decompiled decompiled/roslyn_index.json
+```
+
+When `roslyn_index.json` exists, `game_data.py` loads from it instead of regex parsing. This gives:
+- Exact property extraction (from constructor args and expression-bodied members)
+- Full inheritance chains (`get_class_hierarchy()`)
+- Indexed call graph for O(1) caller/callee lookups
+- 135 enum definitions with all members
+- Override detection without grep
+
+If the index file is absent, the system falls back to the original regex-based parsing automatically.
 
 ## Bridge mod (MCPTest)
 

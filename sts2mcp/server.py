@@ -215,7 +215,7 @@ async def list_tools() -> list[types.Tool]:
                             "image_generation", "testing", "autoslay",
                             "enchantments", "orbs", "game_actions",
                             "overlays", "dynamic_vars", "mechanics",
-                            "vfx_scenes",
+                            "vfx_scenes", "ui_elements",
                         ],
                     },
                 },
@@ -1331,6 +1331,30 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="suggest_hooks",
+            description=(
+                "Given a modding intent in natural language (e.g. 'make potions heal more', "
+                "'add extra card draw', 'prevent death'), recommend which game hooks to override. "
+                "Returns hook names, signatures, ready-to-paste override stubs, and example classes. "
+                "This is the recommended starting point for any mod that interacts with game events."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "intent": {
+                        "type": "string",
+                        "description": "What you want your mod to do (natural language)",
+                    },
+                    "max_suggestions": {
+                        "type": "integer",
+                        "description": "Max hooks to suggest (default 10)",
+                        "default": 10,
+                    },
+                },
+                "required": ["intent"],
+            },
+        ),
+        types.Tool(
             name="analyze_build_output",
             description="Parse dotnet build stdout/stderr into structured compiler errors and warnings.",
             inputSchema={
@@ -1455,6 +1479,173 @@ async def list_tools() -> list[types.Tool]:
                 },
                 "required": ["action"],
             },
+        ),
+        # ── Screen Interaction Tools ──
+        types.Tool(
+            name="bridge_execute_action",
+            description=(
+                "Unified action dispatcher — execute any screen-appropriate action by name. "
+                "Actions: travel/map_travel, event_option, event_proceed, reward_select, reward_proceed, "
+                "reward_skip, shop_buy, shop_proceed, rest_option, rest_proceed, treasure_pick, "
+                "treasure_proceed, card_select, card_confirm, card_skip, discard_potion, proceed. "
+                "Pass action-specific params (choice_index, reward_index, card_index, etc.)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "Action name (e.g. reward_select, card_select, proceed)",
+                    },
+                    "choice_index": {"type": "integer", "description": "For event_option"},
+                    "reward_index": {"type": "integer", "description": "For reward_select"},
+                    "card_index": {"type": "integer", "description": "For card_select (single card)"},
+                    "card_indices": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "For card_select (multiple cards)",
+                    },
+                    "treasure_index": {"type": "integer", "description": "For treasure_pick"},
+                    "potion_index": {"type": "integer", "description": "For discard_potion"},
+                    "item_type": {"type": "string", "description": "For shop_buy: card/relic/potion/remove"},
+                    "index": {"type": "integer", "description": "Generic index for shop items"},
+                    "choice": {"type": "string", "description": "For rest_option: rest/smith/recall"},
+                    "row": {"type": "integer", "description": "For map_travel"},
+                    "col": {"type": "integer", "description": "For map_travel"},
+                    "confirm": {"type": "boolean", "description": "Auto-confirm after card_select"},
+                },
+                "required": ["action"],
+            },
+        ),
+        types.Tool(
+            name="bridge_reward_select",
+            description=(
+                "Claim a reward from the reward screen. Specify the reward_index (0-based) "
+                "from the available rewards shown by bridge_get_available_actions. "
+                "Rewards include gold, cards, relics, and potions."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "reward_index": {"type": "integer", "description": "Reward index (0-based)"},
+                },
+                "required": ["reward_index"],
+            },
+        ),
+        types.Tool(
+            name="bridge_reward_skip",
+            description="Skip the current reward (e.g. skip card reward selection).",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_reward_proceed",
+            description="Proceed from the reward screen after claiming desired rewards.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_card_select",
+            description=(
+                "Select one or more cards on a card selection screen (card reward picks, "
+                "upgrades at rest/events, card removal at shops/events, scry, etc.). "
+                "Use card_index for a single card or card_indices for multiple. "
+                "Set confirm=true to auto-confirm after selection."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "card_index": {"type": "integer", "description": "Single card index (0-based)"},
+                    "card_indices": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Multiple card indices (0-based)",
+                    },
+                    "confirm": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Auto-confirm selection after choosing",
+                    },
+                },
+            },
+        ),
+        types.Tool(
+            name="bridge_card_skip",
+            description="Skip card selection (decline to pick a card reward, cancel selection, etc.).",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_card_confirm",
+            description="Confirm the current card selection (after selecting cards with bridge_card_select).",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_treasure_pick",
+            description=(
+                "Pick a treasure/relic from a treasure chest. Specify treasure_index (0-based) "
+                "from the available items shown by bridge_get_available_actions."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "treasure_index": {"type": "integer", "default": 0, "description": "Treasure index (0-based)"},
+                },
+            },
+        ),
+        types.Tool(
+            name="bridge_treasure_proceed",
+            description="Proceed from the treasure screen after picking (or skipping) treasure.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_proceed",
+            description=(
+                "Generic proceed/advance — works on any screen. Attempts to click proceed, "
+                "continue, leave, or done buttons on the current screen. Use this when you need "
+                "to advance past a screen and no specific action tool applies."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_discard_potion",
+            description=(
+                "Discard a potion from the player's potion slots (e.g. to make room for a new one). "
+                "Specify potion_index (0-based slot position)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "potion_index": {"type": "integer", "description": "Potion slot index (0-based)"},
+                },
+                "required": ["potion_index"],
+            },
+        ),
+        types.Tool(
+            name="bridge_shop_buy",
+            description=(
+                "Buy a specific item from the shop. Specify item_type (card/relic/potion/remove) "
+                "and index (0-based position within that category)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "item_type": {
+                        "type": "string",
+                        "enum": ["card", "relic", "potion", "remove"],
+                        "description": "Type of item to buy",
+                    },
+                    "index": {"type": "integer", "default": 0, "description": "Item index within category (0-based)"},
+                },
+                "required": ["item_type"],
+            },
+        ),
+        types.Tool(
+            name="bridge_shop_proceed",
+            description="Leave the shop and return to the map.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_rest_site_proceed",
+            description="Leave the rest site after performing an action (rest/smith/recall).",
+            inputSchema={"type": "object", "properties": {}},
         ),
         types.Tool(
             name="bridge_get_card_piles",
@@ -1936,6 +2127,48 @@ async def list_tools() -> list[types.Tool]:
                 },
             },
         ),
+        # ── Navigation & Window Helpers ──
+        types.Tool(
+            name="bridge_navigate_to_combat",
+            description=(
+                "Automatically navigate from any screen to the first combat encounter. "
+                "Handles Neow events, card selections, reward screens, map navigation, and other "
+                "intermediate screens. Focuses the game window first. "
+                "Useful for quickly getting to combat for testing mods."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "timeout": {"type": "integer", "default": 60, "description": "Max seconds to reach combat"},
+                    "neow_choice_index": {"type": "integer", "default": 0, "description": "Which Neow option to pick"},
+                },
+            },
+        ),
+        types.Tool(
+            name="bridge_focus_game",
+            description=(
+                "Bring the Slay the Spire 2 window to the foreground (Windows only). "
+                "Call before bridge commands if scene transitions aren't executing — "
+                "the game may not process transitions when its window is unfocused."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_wait_for_screen",
+            description=(
+                "Wait until the game reaches a specific screen (case-insensitive substring match). "
+                "Screen names: MAIN_MENU, MAP, COMBAT_PLAYER_TURN, COMBAT_ENEMY_TURN, EVENT, "
+                "SHOP, REST_SITE, TREASURE, REWARD, CARD_SELECTION, GAME_OVER."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "target_screen": {"type": "string", "description": "Screen name to wait for"},
+                    "timeout": {"type": "integer", "default": 15, "description": "Max seconds to wait"},
+                },
+                "required": ["target_screen"],
+            },
+        ),
         # ── Test Runner Tools ──
         types.Tool(
             name="run_test_scenario",
@@ -2196,6 +2429,75 @@ async def list_tools() -> list[types.Tool]:
                     "mod_id": {"type": "string", "default": "mymod"},
                     "overlay_description": {"type": "string", "default": "Custom overlay"},
                     "inject_target": {"type": "string", "default": "NCombatRoom", "description": "Game node to inject into"},
+                },
+                "required": ["mod_namespace", "class_name"],
+            },
+        ),
+        types.Tool(
+            name="generate_floating_panel",
+            description=(
+                "Generate a mouse-following info panel with BBCode rich text, fade animation, and hotkey toggle. "
+                "Great for showing contextual info, card details, or debug data that follows the cursor. "
+                "Uses RichTextLabel with BBCode for colors, bold, italics. "
+                "See get_modding_guide topic 'ui_elements' for patterns."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                    "class_name": {"type": "string", "description": "Panel class name"},
+                    "mod_id": {"type": "string", "default": "mymod"},
+                    "panel_title": {"type": "string", "default": "Info Panel"},
+                    "initial_content": {"type": "string", "default": "Panel content here."},
+                    "hotkey": {"type": "string", "default": "F7", "description": "Toggle key (Godot Key enum name)"},
+                    "inject_target": {"type": "string", "default": "NCombatRoom"},
+                },
+                "required": ["mod_namespace", "class_name"],
+            },
+        ),
+        types.Tool(
+            name="generate_animated_bar",
+            description=(
+                "Generate an animated progress bar with smooth tweens, color gradients (green→red), "
+                "flash-on-damage, and optional low-value pulse effect. "
+                "Use for HP trackers, XP bars, charge meters, or any numeric display. "
+                "See get_modding_guide topic 'ui_elements' for patterns."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                    "class_name": {"type": "string", "description": "Bar class name"},
+                    "mod_id": {"type": "string", "default": "mymod"},
+                    "bar_label": {"type": "string", "default": "Health"},
+                    "bar_width": {"type": "string", "default": "200"},
+                    "bar_height": {"type": "string", "default": "20"},
+                    "color_low": {"type": "string", "default": "0.9f, 0.2f, 0.15f", "description": "RGB when empty"},
+                    "color_high": {"type": "string", "default": "0.2f, 0.85f, 0.3f", "description": "RGB when full"},
+                    "pulse_enabled": {"type": "string", "default": "true"},
+                    "inject_target": {"type": "string", "default": "NCombatRoom"},
+                },
+                "required": ["mod_namespace", "class_name"],
+            },
+        ),
+        types.Tool(
+            name="generate_scrollable_list",
+            description=(
+                "Generate a toggleable scrollable list panel that slides in from the right edge. "
+                "Supports color-coded item rows with optional count badges. "
+                "Use for deck trackers, log viewers, inventory lists, or any dynamic list display. "
+                "See get_modding_guide topic 'ui_elements' for patterns."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                    "class_name": {"type": "string", "description": "List class name"},
+                    "mod_id": {"type": "string", "default": "mymod"},
+                    "list_title": {"type": "string", "default": "Item List"},
+                    "hotkey": {"type": "string", "default": "F9", "description": "Toggle key"},
+                    "panel_width": {"type": "string", "default": "250"},
+                    "inject_target": {"type": "string", "default": "NCombatRoom"},
                 },
                 "required": ["mod_namespace", "class_name"],
             },
@@ -2465,7 +2767,7 @@ async def _handle_tool(name: str, args: dict):
         return f"Class '{args['class_name']}' not found. Try search_game_code to locate it."
 
     elif name == "search_game_code":
-        results = game_data.search_code(
+        results = game_data.search_code_smart(
             args["pattern"],
             max_results=args.get("max_results", 50),
         )
@@ -2976,6 +3278,12 @@ async def _handle_tool(name: str, args: dict):
     elif name == "get_hook_signature":
         return analyzer.get_hook_signature(args["hook_name"])
 
+    elif name == "suggest_hooks":
+        return analyzer.suggest_hooks(
+            intent=args["intent"],
+            max_suggestions=args.get("max_suggestions", 10),
+        )
+
     elif name == "analyze_build_output":
         return analyzer.analyze_build_output(
             stdout=args.get("stdout", ""),
@@ -3026,6 +3334,78 @@ async def _handle_tool(name: str, args: dict):
             action=args["action"],
             index=args.get("index", 0),
         )
+
+    # ── Screen Interaction Handlers ──
+    elif name == "bridge_execute_action":
+        from . import bridge_client
+        action = args.pop("action")
+        return await _call_bridge(bridge_client.execute_action, action, **args)
+
+    elif name == "bridge_reward_select":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.reward_select, args["reward_index"])
+
+    elif name == "bridge_reward_skip":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.execute_action, "reward_skip")
+
+    elif name == "bridge_reward_proceed":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.reward_proceed)
+
+    elif name == "bridge_card_select":
+        from . import bridge_client
+        if "card_indices" in args:
+            return await _call_bridge(
+                bridge_client.card_select,
+                args["card_indices"],
+                confirm=args.get("confirm", False),
+            )
+        return await _call_bridge(
+            bridge_client.card_select,
+            args.get("card_index", 0),
+            confirm=args.get("confirm", False),
+        )
+
+    elif name == "bridge_card_skip":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.card_skip)
+
+    elif name == "bridge_card_confirm":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.card_confirm)
+
+    elif name == "bridge_treasure_pick":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.treasure_pick, args.get("treasure_index", 0))
+
+    elif name == "bridge_treasure_proceed":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.treasure_proceed)
+
+    elif name == "bridge_proceed":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.proceed)
+
+    elif name == "bridge_discard_potion":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.discard_potion, args["potion_index"])
+
+    elif name == "bridge_shop_buy":
+        from . import bridge_client
+        return await _call_bridge(
+            bridge_client.shop_buy,
+            item_type=args["item_type"],
+            index=args.get("index", 0),
+        )
+
+    elif name == "bridge_shop_proceed":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.shop_proceed)
+
+    elif name == "bridge_rest_site_proceed":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.rest_site_proceed)
 
     elif name == "bridge_get_card_piles":
         from . import bridge_client
@@ -3186,6 +3566,27 @@ async def _handle_tool(name: str, args: dict):
             max_floor=args.get("max_floor"),
         )
 
+    # ── Navigation & Window Helpers ──
+    elif name == "bridge_navigate_to_combat":
+        from . import bridge_client
+        return await _call_bridge(
+            bridge_client.navigate_to_combat,
+            timeout=args.get("timeout", 60),
+            neow_choice_index=args.get("neow_choice_index", 0),
+        )
+
+    elif name == "bridge_focus_game":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.focus_game_window)
+
+    elif name == "bridge_wait_for_screen":
+        from . import bridge_client
+        return await _call_bridge(
+            bridge_client.wait_for_screen,
+            args["target_screen"],
+            timeout_seconds=args.get("timeout", 15),
+        )
+
     # ── Test Runner ──
     elif name == "run_test_scenario":
         from .test_runner import run_test_scenario
@@ -3269,6 +3670,42 @@ async def _handle_tool(name: str, args: dict):
             class_name=args["class_name"],
             mod_id=args.get("mod_id", "mymod"),
             overlay_description=args.get("overlay_description", "Custom overlay"),
+            inject_target=args.get("inject_target", "NCombatRoom"),
+        )
+
+    elif name == "generate_floating_panel":
+        return mod_gen.generate_floating_panel(
+            mod_namespace=args["mod_namespace"],
+            class_name=args["class_name"],
+            mod_id=args.get("mod_id", "mymod"),
+            panel_title=args.get("panel_title", "Info Panel"),
+            initial_content=args.get("initial_content", "Panel content here."),
+            hotkey=args.get("hotkey", "F7"),
+            inject_target=args.get("inject_target", "NCombatRoom"),
+        )
+
+    elif name == "generate_animated_bar":
+        return mod_gen.generate_animated_bar(
+            mod_namespace=args["mod_namespace"],
+            class_name=args["class_name"],
+            mod_id=args.get("mod_id", "mymod"),
+            bar_label=args.get("bar_label", "Health"),
+            bar_width=args.get("bar_width", "200"),
+            bar_height=args.get("bar_height", "20"),
+            color_low=args.get("color_low", "0.9f, 0.2f, 0.15f"),
+            color_high=args.get("color_high", "0.2f, 0.85f, 0.3f"),
+            pulse_enabled=args.get("pulse_enabled", "true"),
+            inject_target=args.get("inject_target", "NCombatRoom"),
+        )
+
+    elif name == "generate_scrollable_list":
+        return mod_gen.generate_scrollable_list(
+            mod_namespace=args["mod_namespace"],
+            class_name=args["class_name"],
+            mod_id=args.get("mod_id", "mymod"),
+            list_title=args.get("list_title", "Item List"),
+            hotkey=args.get("hotkey", "F9"),
+            panel_width=args.get("panel_width", "250"),
             inject_target=args.get("inject_target", "NCombatRoom"),
         )
 

@@ -5,289 +5,473 @@ import re
 from pathlib import Path
 from typing import Optional
 
+# Maps modding intents (keywords) to relevant hook names + descriptions.
+# These are AbstractModel virtual methods that modders override on their cards/relics/powers.
+INTENT_TO_HOOKS: dict[str, list[tuple[str, str]]] = {
+    "damage": [
+        ("ModifyDamageAdditive", "Add flat damage (like Strength)"),
+        ("ModifyDamageMultiplicative", "Multiply damage (like Vulnerable)"),
+        ("ModifyDamage", "Hook dispatch — controls additive+multiplicative phases"),
+        ("AfterDamageGiven", "React after dealing damage"),
+        ("AfterDamageReceived", "React after taking damage"),
+        ("BeforeDamageReceived", "Act before damage hits"),
+    ],
+    "block": [
+        ("ModifyBlockAdditive", "Add flat block (like Dexterity)"),
+        ("ModifyBlockMultiplicative", "Multiply block gained"),
+        ("ModifyBlock", "Hook dispatch — controls block modification phases"),
+        ("AfterBlockGained", "React after block is gained"),
+        ("AfterBlockBroken", "React when block reaches zero from damage"),
+        ("BeforeBlockGained", "Act before block is applied"),
+    ],
+    "draw": [
+        ("ModifyHandDraw", "Change number of cards drawn per turn"),
+        ("BeforeHandDraw", "Act before hand is drawn"),
+        ("AfterCardDrawn", "React after a single card is drawn"),
+        ("ShouldDraw", "Gate whether a draw should happen"),
+    ],
+    "card": [
+        ("BeforeCardPlayed", "Act before a card is played"),
+        ("AfterCardPlayed", "React after a card is played"),
+        ("AfterCardExhausted", "React when a card is exhausted"),
+        ("AfterCardDiscarded", "React when a card is discarded"),
+        ("AfterCardRetained", "React when a card is retained"),
+        ("ModifyEnergyCostInCombat", "Change a card's energy cost during combat"),
+        ("ShouldAllowCardPlay", "Gate whether a card can be played"),
+    ],
+    "energy": [
+        ("ModifyMaxEnergy", "Change max energy per turn"),
+        ("AfterEnergyReset", "React after energy resets at turn start"),
+        ("ModifyEnergyCostInCombat", "Change card energy costs"),
+    ],
+    "cost": [
+        ("ModifyEnergyCostInCombat", "Change card energy costs in combat"),
+        ("ModifyMerchantPrice", "Change shop prices"),
+        ("ModifyStarCost", "Change star/forge costs"),
+    ],
+    "power": [
+        ("ModifyPowerAmountGiven", "Change power stacks applied to others"),
+        ("ModifyPowerAmountReceived", "Change power stacks received"),
+        ("AfterPowerAmountChanged", "React when a power's stacks change"),
+        ("BeforePowerAmountChanged", "Act before power stacks change"),
+    ],
+    "heal": [
+        ("ModifyHealAmount", "Change healing amount"),
+        ("ModifyRestSiteHealAmount", "Change rest site healing specifically"),
+        ("AfterRestSiteHeal", "React after rest site healing"),
+    ],
+    "hp": [
+        ("ModifyHealAmount", "Change healing amount"),
+        ("ModifyMaxHp", "Change max HP"),
+        ("ShouldDie", "Gate whether a creature should die (return false to prevent death)"),
+    ],
+    "death": [
+        ("ShouldDie", "Gate whether a creature dies (return false to prevent)"),
+        ("BeforeDeath", "Act before a creature dies"),
+        ("AfterDeath", "React after a creature dies"),
+    ],
+    "gold": [
+        ("ModifyGoldGained", "Change gold gained amount"),
+        ("AfterGoldGained", "React after gaining gold"),
+        ("ShouldGainGold", "Gate whether gold should be gained"),
+    ],
+    "reward": [
+        ("ModifyRewards", "Change combat rewards"),
+        ("ModifyCardRewardOptions", "Change card reward choices"),
+        ("ModifyCardRewardCreationOptions", "Change how reward cards are generated"),
+        ("AfterRewardTaken", "React after a reward is taken"),
+    ],
+    "shop": [
+        ("ModifyMerchantPrice", "Change shop item prices"),
+        ("AfterItemPurchased", "React after buying from the shop"),
+    ],
+    "turn": [
+        ("BeforeTurnEnd", "Act before the turn ends"),
+        ("AfterTurnEnd", "React after the turn ends"),
+        ("BeforePlayPhaseStart", "Act before the play phase begins"),
+        ("ShouldTakeExtraTurn", "Grant an extra turn"),
+    ],
+    "combat": [
+        ("BeforeCombatStart", "Act when combat begins"),
+        ("AfterCombatStart", "React after combat setup"),
+        ("AfterCombatEnd", "React when combat ends"),
+        ("AfterCombatVictory", "React after winning combat"),
+    ],
+    "potion": [
+        ("BeforePotionUsed", "Act before a potion is used"),
+        ("AfterPotionUsed", "React after potion use"),
+        ("ShouldProcurePotion", "Gate whether a potion is obtained"),
+    ],
+    "orb": [
+        ("ModifyOrbValue", "Change orb passive/evoke values"),
+        ("AfterOrbChanneled", "React after channeling an orb"),
+        ("AfterOrbEvoked", "React after evoking an orb"),
+    ],
+    "rest": [
+        ("ModifyRestSiteHealAmount", "Change rest site heal amount"),
+        ("AfterRestSiteHeal", "React after resting"),
+        ("AfterRestSiteSmith", "React after smithing (upgrading at rest)"),
+        ("ModifyRestSiteOptions", "Change available rest site options"),
+    ],
+    "map": [
+        ("ModifyGeneratedMap", "Change the generated map layout"),
+        ("BeforeRoomEntered", "Act before entering a room"),
+        ("AfterRoomEntered", "React after entering a room"),
+    ],
+    "exhaust": [
+        ("AfterCardExhausted", "React when a card is exhausted"),
+    ],
+    "discard": [
+        ("AfterCardDiscarded", "React when a card is discarded"),
+    ],
+    "upgrade": [
+        ("OnUpgrade", "Define what happens when a card is upgraded"),
+        ("AfterRestSiteSmith", "React after smithing at a rest site"),
+    ],
+    "target": [
+        ("ShouldAllowTargeting", "Gate whether a creature can be targeted"),
+        ("ShouldAllowHitting", "Gate whether an attack can hit"),
+    ],
+    "relic": [
+        ("AfterRoomEntered", "Trigger when entering a new room"),
+        ("BeforeCombatStart", "Trigger at combat start"),
+        ("AfterCombatVictory", "Trigger after winning combat"),
+        ("AfterCardPlayed", "React to cards being played"),
+    ],
+    "monster": [
+        ("AfterCreatureAddedToCombat", "React when a creature enters combat"),
+        ("ShouldDie", "Prevent creature death"),
+        ("AfterDeath", "React after creature death"),
+    ],
+    "encounter": [
+        ("AfterRoomEntered", "React when entering a room"),
+        ("BeforeCombatStart", "Act before encounter combat begins"),
+    ],
+}
+
 
 class CodeAnalyzer:
     """Provides code intelligence on top of the GameDataIndex."""
 
     def __init__(self, game_data):
         self.game_data = game_data
+        self._call_graph_built = False
+        self._callers_of: dict[str, list[str]] = {}  # "Class.Method" -> callers
+        self._callees_of: dict[str, list[str]] = {}  # "Class.Method" -> callees
+
+    def _ensure_call_graph(self):
+        """Build inverted call graph from Roslyn invocation data (lazy, one-time)."""
+        if self._call_graph_built:
+            return
+        self._call_graph_built = True
+        if not self.game_data._roslyn_loaded:
+            return
+        for class_name, cls_data in self.game_data.roslyn_classes.items():
+            for method in cls_data.get("methods", []):
+                key = f"{class_name}.{method['name']}"
+                invocations = method.get("invocations", [])
+                self._callees_of[key] = invocations
+                for inv in invocations:
+                    self._callers_of.setdefault(inv, []).append(key)
+
+    # ── Hook suggestion (intent-based) ──────────────────────────────────────
+
+    def suggest_hooks(self, intent: str, max_suggestions: int = 10) -> dict:
+        """Given a modding intent, recommend which game hooks to override."""
+        self.game_data.ensure_indexed()
+
+        matched = self._find_hooks_for_intent(intent)
+        suggestions = []
+
+        for hook_name, relevance in matched[:max_suggestions]:
+            # Look up full hook data (Hook statics first, then AbstractModel virtuals)
+            hook_data = next((h for h in self.game_data.hooks if h["name"] == hook_name), None)
+            if not hook_data:
+                hook_data = self._build_overridable_hook_data(hook_name)
+            if not hook_data:
+                continue
+
+            examples = self._find_example_overriders(hook_name, max_examples=3)
+
+            suggestions.append({
+                "hook_name": hook_name,
+                "signature": f"{hook_data['return_type']} {hook_name}({hook_data['params']})",
+                "category": hook_data.get("category", ""),
+                "subcategory": hook_data.get("subcategory", ""),
+                "relevance": relevance,
+                "override_stub": self._build_hook_override_stub(hook_data),
+                "examples": examples,
+            })
+
+        return {
+            "intent": intent,
+            "suggestion_count": len(suggestions),
+            "suggestions": suggestions,
+            "tip": "Use get_entity_source on an example class to see a full implementation.",
+        }
+
+    def _find_hooks_for_intent(self, query: str) -> list[tuple[str, str]]:
+        """Map natural language intent to (hook_name, relevance_note) tuples."""
+        query_lower = query.lower()
+        tokens = set(re.findall(r"\b[a-z]{3,}\b", query_lower))
+
+        matched: list[tuple[str, str]] = []
+        seen: set[str] = set()
+
+        # Phase 1: Keyword match from INTENT_TO_HOOKS
+        for keyword, hooks in INTENT_TO_HOOKS.items():
+            if keyword in tokens or keyword in query_lower:
+                for hook_name, note in hooks:
+                    if hook_name not in seen:
+                        seen.add(hook_name)
+                        matched.append((hook_name, note))
+
+        # Phase 2: Direct name match against all hooks + overridable hooks
+        if not matched:
+            all_hooks = list(self.game_data.hooks) + [
+                {"name": n} for n in self.game_data.overridable_hooks
+            ]
+            for hook in all_hooks:
+                hook_lower = hook["name"].lower()
+                for token in tokens:
+                    if len(token) >= 4 and token in hook_lower and hook["name"] not in seen:
+                        seen.add(hook["name"])
+                        matched.append((hook["name"], f"Hook name contains '{token}'"))
+
+        # Phase 3: Parameter type match
+        if not matched:
+            for hook in self.game_data.hooks:
+                params_lower = hook.get("params", "").lower()
+                for token in tokens:
+                    if len(token) >= 4 and token in params_lower and hook["name"] not in seen:
+                        seen.add(hook["name"])
+                        matched.append((hook["name"], f"Hook accepts parameter containing '{token}'"))
+
+        return matched
+
+    def _find_example_overriders(self, hook_name: str, max_examples: int = 3) -> list[dict]:
+        """Find non-mock game entities that override a given hook method."""
+        overrides = self.game_data.find_overrides_of(hook_name)
+        examples = []
+        for o in overrides:
+            cls_name = o.get("class", "")
+            if "Mock" in cls_name:
+                continue
+            entity = self.game_data.entities.get(cls_name)
+            etype = entity.entity_type if entity else ""
+            if etype and etype.endswith("_mock"):
+                continue
+            examples.append({"class": cls_name, "type": etype})
+            if len(examples) >= max_examples:
+                break
+        return examples
+
+    def _build_overridable_hook_data(self, method_name: str) -> Optional[dict]:
+        """Build hook-like data dict for an AbstractModel virtual method."""
+        if method_name not in self.game_data.overridable_hooks:
+            return None
+        am = self.game_data.roslyn_classes.get("AbstractModel", {})
+        for method in am.get("methods", []):
+            if method["name"] == method_name:
+                params_str = ", ".join(
+                    f"{p['type']} {p['name']}" for p in method.get("parameters", [])
+                )
+                return {
+                    "name": method_name,
+                    "return_type": method["return_type"],
+                    "params": params_str,
+                    "category": "override",
+                    "subcategory": self.game_data._classify_hook(method_name),
+                }
+        return None
+
+    # ── Patch suggestion (legacy + improved) ──────────────────────────────────
 
     def suggest_patches(self, desired_behavior: str, max_suggestions: int = 10) -> dict:
-        """Given a description of desired behavior change, search decompiled source for relevant methods to patch.
+        """Given a description of desired behavior change, suggest hooks and patch targets.
 
-        Analyzes the desired_behavior string for keywords and maps them to relevant game classes/methods.
-        Returns suggested Harmony patches with target class, method, patch type, and rationale.
+        Uses INTENT_TO_HOOKS for hook recommendations (primary), then Roslyn class lookups
+        for Harmony patch targets (secondary). Falls back to regex search only when needed.
         """
         self.game_data.ensure_indexed()
 
-        # Keyword mapping: common modding desires -> relevant classes and search patterns
-        behavior_keywords = {
-            "damage": [
-                ("DamageCmd", r"class DamageCmd"),
-                ("ModifyDamage", r"ModifyDamage(?:Additive|Multiplicative)"),
-                ("DamageResult", r"class DamageResult"),
-                ("AttackIntent", r"GetSingleDamage|GetTotalDamage"),
-            ],
-            "block": [
-                ("CreatureCmd", r"GainBlock"),
-                ("ModifyBlock", r"ModifyBlock"),
-                ("BlockVar", r"class BlockVar"),
-            ],
-            "card": [
-                ("CardModel", r"class CardModel"),
-                ("CardPileCmd", r"class CardPileCmd"),
-                ("OnPlay", r"override.*OnPlay"),
-                ("CardEntity", r"class CardEntity"),
-                ("EnergyCost", r"EnergyCost|ModifyEnergyCost"),
-            ],
-            "draw": [
-                ("CardPileCmd", r"Draw\("),
-                ("ModifyHandDraw", r"ModifyHandDraw"),
-                ("BeforeHandDraw", r"BeforeHandDraw"),
-            ],
-            "energy": [
-                ("ModifyMaxEnergy", r"ModifyMaxEnergy"),
-                ("EnergyReset", r"EnergyReset|AfterEnergyReset"),
-                ("PlayerCombatState", r"Energy.*set"),
-            ],
-            "relic": [
-                ("RelicModel", r"class RelicModel"),
-                ("RelicEntity", r"class RelicEntity"),
-            ],
-            "power": [
-                ("PowerModel", r"class PowerModel"),
-                ("PowerCmd", r"class PowerCmd"),
-                ("ModifyPowerAmount", r"ModifyPowerAmount"),
-            ],
-            "potion": [
-                ("PotionModel", r"class PotionModel"),
-                ("OnUse", r"override.*OnUse"),
-                ("PotionEntity", r"class PotionEntity"),
-            ],
-            "gold": [
-                ("GoldCmd", r"GoldCmd|GainGold|ModifyGold"),
-                ("AfterGoldGained", r"AfterGoldGained"),
-            ],
-            "heal": [
-                ("HealCmd", r"HealCmd|Heal\("),
-                ("ModifyHealAmount", r"ModifyHealAmount"),
-            ],
-            "hp": [
-                ("Creature", r"MaxHp|CurrentHp|InitialHp"),
-                ("HealCmd", r"HealCmd|Heal\("),
-                ("ModifyHealAmount", r"ModifyHealAmount"),
-            ],
-            "health": [
-                ("Creature", r"MaxHp|CurrentHp"),
-                ("HealCmd", r"HealCmd|Heal\("),
-            ],
-            "max": [
-                ("ModifyMaxEnergy", r"ModifyMaxEnergy"),
-                ("MaxHp", r"MaxHp|MaxInitialHp"),
-            ],
-            "increase": [
-                ("ModifyDamage", r"Modify\w+Additive"),
-                ("MaxHp", r"MaxHp|MaxInitialHp"),
-            ],
-            "reward": [
-                ("RewardManager", r"class.*Reward"),
-                ("ModifyRewards", r"ModifyRewards"),
-                ("ModifyCardRewardOptions", r"ModifyCardRewardOptions"),
-            ],
-            "shop": [
-                ("MerchantRoom", r"class MerchantRoom"),
-                ("ModifyMerchantPrice", r"ModifyMerchantPrice"),
-            ],
-            "map": [
-                ("ModifyGeneratedMap", r"ModifyGeneratedMap"),
-                ("MapGenerator", r"class.*MapGenerator"),
-            ],
-            "combat": [
-                ("CombatManager", r"class CombatManager"),
-                ("CombatState", r"class CombatState"),
-            ],
-            "turn": [
-                ("BeforeTurnEnd", r"BeforeTurnEnd"),
-                ("AfterTurnEnd", r"AfterTurnEnd"),
-                ("EndPlayerTurnAction", r"EndPlayerTurn"),
-            ],
-            "death": [
-                ("ShouldDie", r"ShouldDie"),
-                ("BeforeDeath", r"BeforeDeath"),
-                ("AfterDeath", r"AfterDeath"),
-            ],
-            "cost": [
-                ("EnergyCost", r"EnergyCost"),
-                ("ModifyEnergyCostInCombat", r"ModifyEnergyCostInCombat"),
-                ("ModifyMerchantPrice", r"ModifyMerchantPrice"),
-                ("ModifyStarCost", r"ModifyStarCost"),
-            ],
-            "orb": [
-                ("OrbModel", r"class OrbModel"),
-                ("OrbCmd", r"OrbCmd|ChannelOrb|EvokeOrb"),
-                ("ModifyOrbValue", r"ModifyOrbValue"),
-            ],
-            "rest": [
-                ("RestSiteRoom", r"class RestSiteRoom"),
-                ("AfterRestSiteHeal", r"AfterRestSiteHeal"),
-                ("AfterRestSiteSmith", r"AfterRestSiteSmith"),
-            ],
-            "encounter": [
-                ("EncounterModel", r"class EncounterModel"),
-                ("GenerateAllEncounters", r"GenerateAllEncounters"),
-            ],
-            "event": [
-                ("EventModel", r"class EventModel"),
-                ("EventOption", r"class EventOption"),
-            ],
-            "monster": [
-                ("MonsterModel", r"class MonsterModel"),
-                ("MonsterMoveStateMachine", r"GenerateMoveStateMachine"),
-            ],
-            "upgrade": [
-                ("OnUpgrade", r"override.*OnUpgrade"),
-                ("CardSelection", r"class.*CardSelection"),
-            ],
-            "exhaust": [
-                ("AfterCardExhausted", r"AfterCardExhausted"),
-                ("ExhaustPile", r"ExhaustPile"),
-            ],
-            "discard": [
-                ("AfterCardDiscarded", r"AfterCardDiscarded"),
-                ("DiscardPile", r"DiscardPile"),
-            ],
-            "target": [
-                ("TargetType", r"TargetType"),
-                ("IsValidTarget", r"IsValidTarget"),
-                ("ShouldAllowTargeting", r"ShouldAllowTargeting"),
-            ],
-            "animation": [
-                ("NCreatureVisuals", r"class NCreatureVisuals"),
-                ("Animation", r"Animation|Animate"),
-            ],
-            "save": [
-                ("SaveManager", r"class SaveManager"),
-                ("SaveData", r"SaveData|OnSave|OnLoad"),
-            ],
-            "screen": [
-                ("NGame", r"class NGame"),
-                ("ScreenContext", r"ScreenContext|ActiveScreen"),
-            ],
-            "keyword": [
-                ("CardKeyword", r"CardKeyword"),
-                ("HoverTip", r"class.*HoverTip"),
-            ],
-        }
-
-        # Find relevant keywords in the desired behavior
-        behavior_lower = desired_behavior.lower()
-        matched_patterns = []
-
-        for keyword, patterns in behavior_keywords.items():
-            if keyword in behavior_lower:
-                matched_patterns.extend(patterns)
-
-        # If no keyword match, do a broad search
-        if not matched_patterns:
-            # Extract notable words and search for them
-            words = re.findall(r'\b[a-z]{4,}\b', behavior_lower)
-            for word in words[:5]:
-                results = self.game_data.search_code(word, max_results=5)
-                for r in results:
-                    class_match = re.search(r'class\s+(\w+)', r.get("content", ""))
-                    if class_match:
-                        matched_patterns.append((class_match.group(1), re.escape(word)))
-
-        # Search for each pattern and build suggestions
         suggestions = []
-        seen_targets = set()
+        seen = set()
 
-        for target_hint, pattern in matched_patterns:
+        # Layer 1: Hook-based suggestions (primary — most mods use hooks, not Harmony)
+        hook_matches = self._find_hooks_for_intent(desired_behavior)
+        for hook_name, relevance in hook_matches:
             if len(suggestions) >= max_suggestions:
                 break
+            if hook_name in seen:
+                continue
+            seen.add(hook_name)
 
-            results = self.game_data.search_code(pattern, max_results=10)
-            for r in results:
-                file_path = r.get("file", "")
-                content = r.get("content", "").strip()
-                line = r.get("line", 0)
+            hook_data = next((h for h in self.game_data.hooks if h["name"] == hook_name), None)
+            if not hook_data:
+                hook_data = self._build_overridable_hook_data(hook_name)
+            if not hook_data:
+                continue
 
-                # Extract class and method from context (handle both / and \ separators)
-                path_parts = re.split(r'[/\\]', file_path)
-                class_name = path_parts[-1].replace(".cs", "") if path_parts else ""
+            examples = self._find_example_overriders(hook_name, max_examples=2)
+            example_str = ", ".join(e["class"] for e in examples) if examples else ""
 
-                # Try declaration pattern first
-                method_match = re.search(
-                    r'(?:public|protected|private|internal)\s+(?:static\s+)?(?:async\s+)?'
-                    r'(?:override\s+)?(?:virtual\s+)?(?:[\w<>\[\]?,\s]+?)\s+(\w+)\s*\(',
-                    content,
-                )
-                if not method_match:
-                    # Try method call pattern: .MethodName( or ClassName.MethodName(
-                    method_match = re.search(r'\.(\w+)\s*[\(<]', content)
-                method_name = method_match.group(1) if method_match else ""
+            suggestions.append({
+                "target_class": "YourModel",
+                "target_method": hook_name,
+                "patch_type": "Override",
+                "rationale": relevance + (f" (see: {example_str})" if example_str else ""),
+                "file": "",
+                "line": 0,
+                "context": f"public override {hook_data['return_type']} {hook_name}({hook_data['params']})",
+            })
 
-                if not class_name or not method_name:
-                    continue
-
-                key = f"{class_name}.{method_name}"
-                if key in seen_targets:
-                    continue
-                seen_targets.add(key)
-
-                # Determine patch type
-                patch_type = "Postfix"
-                rationale = f"Modify behavior after {method_name} executes"
-                if "Modify" in method_name or "Get" in method_name:
-                    patch_type = "Postfix"
-                    rationale = f"Modify the return value of {method_name}"
-                elif "Before" in method_name or "Should" in method_name:
-                    patch_type = "Prefix"
-                    rationale = f"Intercept before {method_name} to change behavior"
-                elif "Create" in method_name or "Generate" in method_name:
-                    patch_type = "Postfix"
-                    rationale = f"Modify the generated result from {method_name}"
-
-                suggestions.append({
-                    "target_class": class_name,
-                    "target_method": method_name,
-                    "patch_type": patch_type,
-                    "rationale": rationale,
-                    "file": file_path,
-                    "line": line,
-                    "context": content[:200],
-                })
-
+        # Layer 2: Direct class/method lookup via Roslyn (for specific class names in the query)
+        if self.game_data._roslyn_loaded:
+            # Check if query mentions specific PascalCase class names
+            mentioned_classes = re.findall(r"\b([A-Z][a-zA-Z]+(?:Model|Cmd|Manager|Entity|Power|State))\b", desired_behavior)
+            for cls_name in mentioned_classes:
                 if len(suggestions) >= max_suggestions:
                     break
+                cls_data = self.game_data.roslyn_classes.get(cls_name)
+                if not cls_data:
+                    continue
+                for method in cls_data.get("methods", []):
+                    mods = method.get("modifiers", [])
+                    if "public" in mods and ("virtual" in mods or "static" in mods):
+                        key = f"{cls_name}.{method['name']}"
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        patch_type = "Postfix"
+                        if method["name"].startswith(("Before", "Should")):
+                            patch_type = "Prefix"
+                        suggestions.append({
+                            "target_class": cls_name,
+                            "target_method": method["name"],
+                            "patch_type": patch_type,
+                            "rationale": f"Harmony patch on {cls_name}.{method['name']}",
+                            "file": cls_data.get("file", ""),
+                            "line": method.get("line_start", 0),
+                            "context": f"{method['return_type']} {method['name']}({', '.join(p['type'] + ' ' + p['name'] for p in method.get('parameters', []))})",
+                        })
+                        if len(suggestions) >= max_suggestions:
+                            break
+
+        # Layer 3: Regex fallback for queries with no hook or class matches
+        if not suggestions:
+            behavior_lower = desired_behavior.lower()
+            words = re.findall(r"\b[a-z]{4,}\b", behavior_lower)
+            for word in words[:3]:
+                if len(suggestions) >= max_suggestions:
+                    break
+                results = self.game_data.search_code(word, max_results=5)
+                for r in results:
+                    file_path = r.get("file", "")
+                    content = r.get("content", "").strip()
+                    path_parts = re.split(r"[/\\]", file_path)
+                    class_name = path_parts[-1].replace(".cs", "") if path_parts else ""
+                    # Skip mocks
+                    if "Mock" in class_name or "mock" in file_path.lower():
+                        continue
+                    method_match = re.search(
+                        r"(?:public|protected)\s+(?:static\s+)?(?:async\s+)?(?:override\s+)?"
+                        r"(?:virtual\s+)?(?:[\w<>\[\]?,\s]+?)\s+(\w+)\s*\(",
+                        content,
+                    )
+                    if not method_match:
+                        continue
+                    method_name = method_match.group(1)
+                    key = f"{class_name}.{method_name}"
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    suggestions.append({
+                        "target_class": class_name,
+                        "target_method": method_name,
+                        "patch_type": "Postfix",
+                        "rationale": f"Contains '{word}' — verify relevance before patching",
+                        "file": file_path,
+                        "line": r.get("line", 0),
+                        "context": content[:200],
+                    })
 
         return {
             "query": desired_behavior,
             "suggestion_count": len(suggestions),
             "suggestions": suggestions,
-            "tip": "Use get_entity_source to read the full source of suggested classes before patching.",
+            "tip": "Hook overrides (patch_type='Override') are preferred over Harmony patches. Use suggest_hooks for more detail.",
         }
 
     def analyze_method_callers(self, class_name: str, method_name: str, max_results: int = 30) -> dict:
         """Show who calls a method and what it calls (basic call graph)."""
         self.game_data.ensure_indexed()
 
-        # Find callers (who calls this method)
+        if self.game_data._roslyn_loaded:
+            return self._analyze_callers_roslyn(class_name, method_name, max_results)
+        return self._analyze_callers_regex(class_name, method_name, max_results)
+
+    def _analyze_callers_roslyn(self, class_name: str, method_name: str, max_results: int) -> dict:
+        """Call graph analysis using Roslyn invocation index (O(1) lookup)."""
+        self._ensure_call_graph()
+
+        target = f"{class_name}.{method_name}"
+
+        # Callers: who calls this method
+        raw_callers = self._callers_of.get(target, [])
+        callers = []
+        for caller_key in raw_callers[:max_results]:
+            parts = caller_key.split(".", 1)
+            caller_cls = parts[0] if parts else ""
+            caller_method = parts[1] if len(parts) > 1 else ""
+            cls_data = self.game_data.roslyn_classes.get(caller_cls, {})
+            callers.append({
+                "file": cls_data.get("file", ""),
+                "class": caller_cls,
+                "method": caller_method,
+                "content": f"{caller_cls}.{caller_method} calls {class_name}.{method_name}",
+            })
+
+        # Callees: what does this method call
+        callees = self._callees_of.get(target, [])
+
+        # Overrides: who overrides this method
+        overrides = self.game_data.find_overrides_of(method_name)
+        override_results = [
+            {
+                "file": o.get("file", ""),
+                "class": o.get("class", ""),
+                "content": f"override {o.get('return_type', '')} {method_name}({', '.join(p['type'] + ' ' + p['name'] for p in o.get('parameters', []))})",
+            }
+            for o in overrides[:max_results]
+        ]
+
+        return {
+            "class": class_name,
+            "method": method_name,
+            "callers": {
+                "count": len(raw_callers),
+                "results": callers,
+            },
+            "callees": callees,
+            "overrides": {
+                "count": len(overrides),
+                "results": override_results,
+            },
+        }
+
+    def _analyze_callers_regex(self, class_name: str, method_name: str, max_results: int) -> dict:
+        """Fallback call graph using regex search."""
         call_pattern = rf'\.{re.escape(method_name)}\s*[\(<]'
         callers = self.game_data.search_code(call_pattern, max_results=max_results)
-
-        # Filter out the definition itself
         callers = [c for c in callers if not re.search(rf'(class|override|virtual|abstract)\s+.*{re.escape(method_name)}', c.get("content", ""))]
 
-        # Find callees (what does this method call) - read the method source
         callees = []
         source = self.game_data.get_source(class_name)
         if source:
-            # Find the method body
             method_pattern = rf'(?:public|protected|private|internal)\s+(?:static\s+)?(?:async\s+)?(?:override\s+)?[\w<>\[\]?,\s]+\s+{re.escape(method_name)}\s*\('
             match = re.search(method_pattern, source)
             if match:
-                # Find the method body (track braces)
                 start = match.start()
                 brace_count = 0
                 in_method = False
@@ -302,8 +486,6 @@ class CodeAnalyzer:
                         method_body += source[i]
                     if in_method and brace_count == 0:
                         break
-
-                # Extract method calls from the body
                 call_matches = re.findall(r'(?:await\s+)?(\w+(?:\.\w+)*)\s*(?:<[^>]+>)?\s*\(', method_body)
                 seen = set()
                 for call in call_matches:
@@ -311,7 +493,6 @@ class CodeAnalyzer:
                         seen.add(call)
                         callees.append(call)
 
-        # Find overrides of this method
         override_pattern = rf'override\s+.*{re.escape(method_name)}\s*\('
         overrides = self.game_data.search_code(override_pattern, max_results=20)
 
@@ -333,6 +514,82 @@ class CodeAnalyzer:
         """Show what other entities an entity interacts with (powers it applies, cards it references, etc.)."""
         self.game_data.ensure_indexed()
 
+        if self.game_data._roslyn_loaded:
+            return self._relationships_roslyn(entity_name)
+        return self._relationships_regex(entity_name)
+
+    def _relationships_roslyn(self, entity_name: str) -> dict:
+        """Entity relationship analysis using Roslyn type references and invocations."""
+        cls_data = self.game_data.roslyn_classes.get(entity_name)
+        if not cls_data:
+            return {"error": f"Entity '{entity_name}' not found"}
+
+        info = self.game_data.get_entity_info(entity_name)
+        type_refs = set(cls_data.get("type_references", []))
+
+        # Collect all invocations across methods
+        all_invocations = set()
+        for method in cls_data.get("methods", []):
+            all_invocations.update(method.get("invocations", []))
+
+        relationships: dict = {
+            "entity": entity_name,
+            "type": info.get("type", "unknown") if info else "unknown",
+            "base_class": cls_data.get("base_class") or "",
+            "interfaces": cls_data.get("interfaces", []),
+            "hierarchy": self.game_data.get_class_hierarchy(entity_name),
+        }
+
+        # Powers: type references that are known power entities
+        power_entities = set(e.name for e in self.game_data.by_type.get("power", []))
+        relationships["applies_powers"] = sorted(type_refs & power_entities)
+
+        # Cards
+        card_entities = set(e.name for e in self.game_data.by_type.get("card", []))
+        relationships["references_cards"] = sorted(type_refs & card_entities)
+
+        # Relics
+        relic_entities = set(e.name for e in self.game_data.by_type.get("relic", []))
+        relationships["references_relics"] = sorted(type_refs & relic_entities)
+
+        # Potions
+        potion_entities = set(e.name for e in self.game_data.by_type.get("potion", []))
+        relationships["references_potions"] = sorted(type_refs & potion_entities)
+
+        # Monsters
+        monster_entities = set(e.name for e in self.game_data.by_type.get("monster", []))
+        relationships["references_monsters"] = sorted(type_refs & monster_entities)
+
+        # Commands used (from invocations like "DamageCmd.Attack")
+        cmd_refs = set()
+        for inv in all_invocations:
+            parts = inv.split(".")
+            if len(parts) >= 2 and parts[0].endswith("Cmd"):
+                cmd_refs.add(parts[0])
+        relationships["uses_commands"] = sorted(cmd_refs)
+
+        # Hooks (override methods that are hooks — both Hook statics and AbstractModel virtuals)
+        all_hook_names = set(h["name"] for h in self.game_data.hooks) | self.game_data.overridable_hooks
+        overridden_hooks = []
+        for method in cls_data.get("methods", []):
+            if "override" in method.get("modifiers", []) and method["name"] in all_hook_names:
+                overridden_hooks.append(method["name"])
+        relationships["hooks_used"] = overridden_hooks
+
+        # Keywords from type references
+        if "CardKeyword" in type_refs:
+            source = self.game_data.get_source(entity_name)
+            if source:
+                kw_refs = re.findall(r"CardKeyword\.(\w+)", source)
+                if kw_refs:
+                    relationships["keywords"] = list(set(kw_refs))
+
+        # Clean up empty lists
+        relationships = {k: v for k, v in relationships.items() if v}
+        return relationships
+
+    def _relationships_regex(self, entity_name: str) -> dict:
+        """Fallback entity relationship analysis using regex."""
         source = self.game_data.get_source(entity_name)
         if not source:
             return {"error": f"Entity '{entity_name}' not found"}
@@ -353,50 +610,40 @@ class CodeAnalyzer:
             "keywords": [],
         }
 
-        # Powers applied (PowerCmd.Apply<XPower> or new XPower)
         power_refs = re.findall(r'(?:Apply|PowerCmd\.Apply)\s*<\s*(\w+Power)\s*>', source)
         power_refs += re.findall(r'new\s+(\w+Power)\s*\(', source)
         relationships["applies_powers"] = list(set(power_refs))
 
-        # Card references (ModelDb.Card<X> or new X())
         card_entities = set(e.name for e in self.game_data.by_type.get("card", []))
         card_refs = re.findall(r'ModelDb\.Card<(\w+)>', source)
         card_refs += [m for m in re.findall(r'new\s+(\w+)\s*\(', source) if m in card_entities]
         relationships["references_cards"] = list(set(card_refs))
 
-        # Relic references
         relic_entities = set(e.name for e in self.game_data.by_type.get("relic", []))
         relic_refs = re.findall(r'ModelDb\.Relic<(\w+)>', source)
         relic_refs += [m for m in re.findall(r'new\s+(\w+)\s*\(', source) if m in relic_entities]
         relationships["references_relics"] = list(set(relic_refs))
 
-        # Potion references
         potion_entities = set(e.name for e in self.game_data.by_type.get("potion", []))
         potion_refs = re.findall(r'ModelDb\.Potion<(\w+)>', source)
         potion_refs += [m for m in re.findall(r'new\s+(\w+)\s*\(', source) if m in potion_entities]
         relationships["references_potions"] = list(set(potion_refs))
 
-        # Monster references
         monster_entities = set(e.name for e in self.game_data.by_type.get("monster", []))
         monster_refs = re.findall(r'ModelDb\.Monster<(\w+)>', source)
         relationships["references_monsters"] = list(set(monster_refs))
 
-        # Commands used
         cmd_refs = re.findall(r'(\w+Cmd)\.\w+', source)
         relationships["uses_commands"] = list(set(cmd_refs))
 
-        # Hooks (override methods that are hooks)
-        hook_names = set(h["name"] for h in self.game_data.hooks)
+        all_hook_names = set(h["name"] for h in self.game_data.hooks) | self.game_data.overridable_hooks
         overrides = re.findall(r'override\s+(?:async\s+)?(?:Task|decimal|bool|int|void)\s*(?:<[^>]+>)?\s+(\w+)\s*\(', source)
-        relationships["hooks_used"] = [o for o in overrides if o in hook_names]
+        relationships["hooks_used"] = [o for o in overrides if o in all_hook_names]
 
-        # Keywords
         kw_refs = re.findall(r'CardKeyword\.(\w+)', source)
         relationships["keywords"] = list(set(kw_refs))
 
-        # Clean up empty lists
         relationships = {k: v for k, v in relationships.items() if v}
-
         return relationships
 
     def validate_mod(self, project_dir: str) -> dict:
@@ -925,13 +1172,20 @@ class CodeAnalyzer:
 
         relevant_hooks = type_hooks.get(entity_type, [])
 
-        # Find hooks the entity actually overrides
-        hook_names = set(h["name"] for h in self.game_data.hooks)
-        overrides = re.findall(
-            r'override\s+(?:async\s+)?(?:Task|decimal|bool|int|void)\s*(?:<[^>]+>)?\s+(\w+)\s*\(',
-            source,
-        )
-        overridden_hooks = sorted(set(o for o in overrides if o in hook_names))
+        # Find hooks the entity actually overrides (both Hook statics + AbstractModel virtuals)
+        all_hook_names = set(h["name"] for h in self.game_data.hooks) | self.game_data.overridable_hooks
+        cls_data = self.game_data.roslyn_classes.get(entity_name)
+        if cls_data:
+            overridden_hooks = sorted(set(
+                m["name"] for m in cls_data.get("methods", [])
+                if "override" in m.get("modifiers", []) and m["name"] in all_hook_names
+            ))
+        else:
+            overrides = re.findall(
+                r'override\s+(?:async\s+)?(?:Task|decimal|bool|int|void)\s*(?:<[^>]+>)?\s+(\w+)\s*\(',
+                source,
+            )
+            overridden_hooks = sorted(set(o for o in overrides if o in all_hook_names))
 
         # Find hooks whose signature accepts this entity's base class
         hooks_by_param = []

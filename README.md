@@ -1,17 +1,17 @@
 # STS2 Modding MCP
 
-A comprehensive [Model Context Protocol](https://modelcontextprotocol.io/) server for **Slay the Spire 2** modding. Reverse-engineers the game's C# assemblies and Godot PCK assets, providing **104 MCP tools** for querying game data, generating mod code, applying it into real projects, building/deploying mods, and driving in-game playtests from AI assistants like Claude Code.
+A comprehensive [Model Context Protocol](https://modelcontextprotocol.io/) server for **Slay the Spire 2** modding. Reverse-engineers the game's C# assemblies and Godot PCK assets, providing **147 MCP tools** for querying game data, generating mod code, applying it into real projects, building/deploying mods, and driving in-game playtests from AI assistants like Claude Code.
 
-> **New in v3.0:** 11 advanced generators and 12 new modding guides based on analysis of 21 community mods — covering multiplayer networking, programmatic Godot UI, IL transpilers, reflection patterns, custom keywords/piles, and much more.
+> **New in v3.1:** Roslyn-based C# code analysis replaces regex parsing — 3,048 classes with full syntax trees, 18,279 methods with call graphs, 135 enums, inverted indexes for O(1) type/override/invocation lookups, and a new `suggest_hooks` tool for intent-based hook recommendations.
 
 ## What It Does
 
 STS2 uses a modified **Godot 4.5.1 C#** engine with **.NET 9.0**. This MCP server decompiles `sts2.dll` and extracts the Godot PCK, indexing the entire game from both sides, giving you instant access to:
 
-- **3,015 game entities** — 577 cards, 290 relics, 260 powers, 64 potions, 121 monsters, 88 encounters, 68 events, 23 enchantments, and more
-- **136 game hooks** — before/after events, value modifiers, boolean gates for combat, cards, damage, powers, turns, rewards, etc.
+- **3,048 game entities** — 577 cards, 290 relics, 261 powers, 64 potions, 119 monsters, 88 encounters, 67 events, 23 enchantments, and more
+- **144 game hooks + 175 overridable methods** — before/after events, value modifiers, boolean gates for combat, cards, damage, powers, turns, rewards, etc.
 - **39 console commands** — in-game developer commands for testing
-- **Full decompiled source** — searchable C# source for every class in the game
+- **Full decompiled source** — searchable C# source for every class in the game, indexed by a Roslyn syntax tree analyzer with call graphs, type references, and inheritance chains
 - **15,000+ Godot assets** — every scene, texture, resource, script, and audio file in the game PCK, searchable by path
 
 It also generates production-ready mod code using [BaseLib](https://www.nuget.org/packages/Alchyr.Sts2.BaseLib) (Alchyr's community modding library) by default, with fallback to the raw game API.
@@ -20,7 +20,7 @@ At the library level, `sts2mcp.mod_gen.ModGenerator` also now includes project-a
 
 ## Tool Highlights
 
-The MCP currently exposes 104 tools. The sections below highlight the main workflows and the newer complex-mod helpers rather than exhaustively listing every advanced scaffold one by one.
+The MCP currently exposes 147 tools. The sections below highlight the main workflows and the newer complex-mod helpers rather than exhaustively listing every advanced scaffold one by one.
 
 ### Game Data Query
 
@@ -28,7 +28,7 @@ The MCP currently exposes 104 tools. The sections below highlight the main workf
 |------|-------------|
 | `list_entities` | Search/filter entities by type, name, rarity. Types: card, relic, potion, power, monster, encounter, event, enchantment, character, orb, act, etc. |
 | `get_entity_source` | Get full decompiled C# source for any game class (cards, base classes, hooks, combat system, etc.) |
-| `search_game_code` | Regex search through all decompiled source (~23MB, 1300+ files) |
+| `search_game_code` | Search decompiled source — uses Roslyn indexes for instant type/override/invocation lookups, falls back to regex for arbitrary patterns |
 | `list_hooks` | List game hooks filtered by category (before/after/modify/should) and subcategory (card/damage/power/turn/etc.) |
 | `get_game_info` | Game version, paths, entity counts, namespace overview |
 | `get_console_commands` | All 39 dev console commands with args and descriptions |
@@ -87,8 +87,9 @@ The existing bridge combat tools are still available alongside these helpers: `b
 
 | Tool | Description |
 |------|-------------|
-| `suggest_patches` | Suggest Harmony patch targets from a desired behavior change |
-| `analyze_method_callers` | Trace callers/callees for a game method |
+| `suggest_hooks` | **New** — Given a modding intent (e.g. "add card draw", "prevent death"), recommend which hooks to override with signatures, stubs, and examples |
+| `suggest_patches` | Suggest hooks and Harmony patch targets from a desired behavior change |
+| `analyze_method_callers` | Trace callers/callees for a game method (O(1) via Roslyn call graph) |
 | `get_entity_relationships` | Map the dependency graph around a card, relic, power, monster, or other entity |
 | `search_hooks_by_signature` | Find hooks by parameter type |
 | `get_hook_signature` | Return a hook signature plus a ready-to-paste override stub |
@@ -265,7 +266,7 @@ The `get_modding_guide` tool provides built-in documentation. The 12 new topics 
 | `harmony_patches` | Prefix, postfix, targeting, common patterns |
 | `localization` | JSON structure, SmartFormat, dynamic vars |
 | `console` | Dev console commands and testing |
-| `hooks` | All 136 hooks by category with signatures |
+| `hooks` | All 144 hooks by category with signatures |
 | `pools` | Card/relic/potion pool system |
 | `building` | dotnet build, PCK export, installation |
 | `debugging` | Remote debugging, logging, common issues |
@@ -296,7 +297,7 @@ The `get_modding_guide` tool provides built-in documentation. The 12 new topics 
 - **[mcp](https://pypi.org/project/mcp/) package** — `pip install "mcp[cli]"`
 - **[ilspycmd](https://www.nuget.org/packages/ilspycmd/)** — `dotnet tool install -g ilspycmd` (for C# decompilation)
 - **[GDRE Tools](https://github.com/GDRETools/gdsdecomp/releases)** — download the latest release and extract to `tools/` or set `GDRE_TOOLS_PATH` (for Godot asset extraction)
-- **.NET SDK 9.0** — for building mods
+- **.NET SDK 9.0** — for building mods and the Roslyn code analyzer (auto-built on first run)
 - **Slay the Spire 2** — the game itself
 
 ## Setup
@@ -381,6 +382,7 @@ Restart Claude Code and the server should appear in `/mcp`.
 
 Once connected, you can ask Claude things like:
 
+- *"Which hook should I use to add extra card draw?"* → uses `suggest_hooks`
 - *"Show me the source code for the Bash card"* → uses `get_entity_source`
 - *"List all rare attack cards"* → uses `list_entities`
 - *"How does the damage hook system work?"* → uses `list_hooks` + `get_entity_source`
@@ -423,7 +425,7 @@ sts2-modding-mcp/
 ├── requirements.txt        # Dependencies
 ├── sts2mcp/
 │   ├── __init__.py
-│   ├── server.py           # MCP server with all 104 tool definitions
+│   ├── server.py           # MCP server with all 147 tool definitions
 │   ├── game_data.py        # Game data indexing and querying
 │   ├── mod_gen.py          # Code generation templates plus project-aware workflow helpers
 │   ├── pck_builder.py      # Pure Python Godot PCK builder
@@ -431,8 +433,10 @@ sts2-modding-mcp/
 │   ├── analysis.py         # Code intelligence — patch suggestions, caller analysis, compatibility checks
 │   ├── bridge_client.py    # TCP JSON-RPC client to in-game MCPTest mod
 │   └── project_workflow.py # Project inspection, apply/merge, PCK build, deploy, and validation helpers
-├── tools/                  # GDRE Tools binary (gitignored, download from GitHub releases)
-├── decompiled/             # Decompiled C# source (gitignored, ~23MB)
+├── tools/
+│   ├── roslyn_analyzer/    # C# Roslyn-based source analyzer (auto-built on first run)
+│   └── gdre_tools.exe      # GDRE Tools binary (gitignored, download from GitHub releases)
+├── decompiled/             # Decompiled C# source + roslyn_index.json (gitignored, ~23MB + ~17MB index)
 └── recovered/              # Recovered Godot project (gitignored, generated by recover_game_project)
 ```
 
@@ -480,7 +484,7 @@ MyMod/
 
 When STS2 updates:
 
-1. **C# source** — run `decompile_game` (or manually re-run `ilspycmd`) to refresh the decompiled source. The index rebuilds automatically on the next query.
+1. **C# source** — run `decompile_game` (or manually re-run `ilspycmd`) to refresh the decompiled source. The Roslyn index automatically rebuilds on the next query (detects staleness via file timestamps).
 2. **Godot assets** — run `recover_game_project` to re-extract scenes, textures, resources, and GDScript from the updated PCK. The in-memory asset list cache refreshes on server restart.
 
 ## License

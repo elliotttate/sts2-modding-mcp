@@ -15,7 +15,10 @@ decompiled/
 recovered/
 
 # GDRE Tools binary (downloaded from github.com/GDRETools/gdsdecomp/releases)
-tools/
+tools/*
+!tools/roslyn_analyzer/
+tools/roslyn_analyzer/bin/
+tools/roslyn_analyzer/obj/
 
 # .NET build artifacts
 bin/

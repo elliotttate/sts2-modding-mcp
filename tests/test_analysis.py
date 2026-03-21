@@ -50,7 +50,7 @@ class TestSuggestPatches:
             assert "target_class" in s
             assert "target_method" in s
             assert "patch_type" in s
-            assert s["patch_type"] in ("Prefix", "Postfix")
+            assert s["patch_type"] in ("Prefix", "Postfix", "Override")
             assert "rationale" in s
 
 
