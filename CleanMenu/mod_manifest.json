@@ -1,0 +1,11 @@
+{
+  "id": "cleanmenu",
+  "pck_name": "CleanMenu",
+  "name": "Clean Menu",
+  "author": "elliotttate",
+  "description": "Hides main menu UI elements to show just the background and logo. Press F1 to toggle.",
+  "version": "1.0.0",
+  "has_pck": false,
+  "has_dll": true,
+  "affects_gameplay": false
+}

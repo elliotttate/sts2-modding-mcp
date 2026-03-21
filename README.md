@@ -294,7 +294,6 @@ The `get_modding_guide` tool provides built-in documentation. The 12 new topics 
 ## Prerequisites
 
 - **Python 3.11+**
-- **[mcp](https://pypi.org/project/mcp/) package** — `pip install "mcp[cli]"`
 - **[ilspycmd](https://www.nuget.org/packages/ilspycmd/)** — `dotnet tool install -g ilspycmd` (for C# decompilation)
 - **[GDRE Tools](https://github.com/GDRETools/gdsdecomp/releases)** — download the latest release and extract to `tools/` or set `GDRE_TOOLS_PATH` (for Godot asset extraction)
 - **.NET SDK 9.0** — for building mods and the Roslyn code analyzer (auto-built on first run)
@@ -305,8 +304,21 @@ The `get_modding_guide` tool provides built-in documentation. The 12 new topics 
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/sts2-modding-mcp.git
+git clone https://github.com/elliotttate/sts2-modding-mcp.git
 cd sts2-modding-mcp
+
+# Create a virtual environment (inside the cloned repo)
+python -m venv venv
+
+# Activate it
+# Windows (PowerShell):
+venv\Scripts\Activate.ps1
+# Windows (cmd):
+venv\Scripts\activate.bat
+# macOS / Linux:
+# source venv/bin/activate
+
+# Install dependencies
 pip install "mcp[cli]"
 ```
 
@@ -350,18 +362,22 @@ export GDRE_TOOLS_PATH="/path/to/gdre_tools.exe"  # optional, defaults to tools/
 
 ### 5. Register with Claude Code
 
+Point the MCP config at the **venv's Python** so dependencies are always available — no need to activate the venv first.
+
 **Option A — Project scope** (`.mcp.json` in your working directory):
 
 ```json
 {
   "mcpServers": {
     "sts2-modding": {
-      "command": "python",
-      "args": ["E:/Github/sts2-modding-mcp/run.py"]
+      "command": "/path/to/sts2-modding-mcp/venv/Scripts/python.exe",
+      "args": ["/path/to/sts2-modding-mcp/run.py"]
     }
   }
 }
 ```
+
+> **macOS / Linux:** use `venv/bin/python` instead of `venv/Scripts/python.exe`.
 
 **Option B — User scope** (`~/.claude/settings.json` under `mcpServers`):
 
@@ -369,12 +385,14 @@ export GDRE_TOOLS_PATH="/path/to/gdre_tools.exe"  # optional, defaults to tools/
 {
   "mcpServers": {
     "sts2-modding": {
-      "command": "python",
-      "args": ["E:/Github/sts2-modding-mcp/run.py"]
+      "command": "/path/to/sts2-modding-mcp/venv/Scripts/python.exe",
+      "args": ["/path/to/sts2-modding-mcp/run.py"]
     }
   }
 }
 ```
+
+Replace `/path/to/sts2-modding-mcp` with the actual path where you cloned the repo.
 
 Restart Claude Code and the server should appear in `/mcp`.
 
