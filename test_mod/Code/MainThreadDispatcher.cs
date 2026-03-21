@@ -53,10 +53,12 @@ public static class MainThreadDispatcher
 
     /// <summary>
     /// Run a function on the main thread and return its result. Blocks the calling thread.
+    /// If already on the main thread, executes directly to avoid deadlock.
     /// </summary>
     public static T Invoke<T>(Func<T> func)
     {
-        if (_gameContext == null)
+        // If no context captured, or we're already on the main thread, execute directly
+        if (_gameContext == null || SynchronizationContext.Current == _gameContext)
         {
             return func();
         }

@@ -1,5 +1,6 @@
 """MCP Server for Slay the Spire 2 modding."""
 
+import asyncio
 import json
 import os
 import subprocess
@@ -14,6 +15,9 @@ from .game_data import GameDataIndex
 from .mod_gen import ModGenerator
 from .pck_builder import build_pck, list_pck_contents
 from .character_assets import get_character_asset_paths, scaffold_character_assets
+from .analysis import CodeAnalyzer
+from . import gdre_tools
+from . import image_gen
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -31,6 +35,11 @@ DECOMPILED_DIR = os.environ.get(
 server = Server("sts2-modding-mcp")
 game_data = GameDataIndex(DECOMPILED_DIR)
 mod_gen = ModGenerator(GAME_DIR)
+analyzer = CodeAnalyzer(game_data)
+
+
+async def _call_bridge(func, *args, **kwargs):
+    return await asyncio.to_thread(func, *args, **kwargs)
 
 
 # ─── Tool Definitions ────────────────────────────────────────────────────────
@@ -177,9 +186,13 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="get_modding_guide",
             description=(
-                "Get contextual documentation for modding STS2. Topics: getting_started, cards, relics, "
-                "powers, potions, monsters, encounters, events, harmony_patches, localization, "
-                "console, hooks, pools, building, debugging, project_structure."
+                "Get contextual documentation for modding STS2. Covers 40+ topics including content creation "
+                "(cards, relics, powers, potions, monsters, encounters, events, enchantments, orbs, modifiers), "
+                "systems (hooks, pools, combat_deep_dive, dynamic_vars, game_actions, mechanics, vfx_scenes, overlays), "
+                "infrastructure (harmony_patches, localization, building, project_structure, resource_loading, godot_ui_construction), "
+                "BaseLib (custom_keywords_and_piles, mod_config_integration), advanced (reflection_patterns, advanced_harmony, "
+                "multiplayer_networking, rng_and_determinism, save_file_format), and testing/debugging "
+                "(debugging, testing, autoslay, console, bridge_setup, troubleshooting, workflows, game_log_parsing)."
             ),
             inputSchema={
                 "type": "object",
@@ -191,7 +204,18 @@ async def list_tools() -> list[types.Tool]:
                             "getting_started", "cards", "relics", "powers", "potions",
                             "monsters", "encounters", "events", "harmony_patches",
                             "localization", "console", "hooks", "pools", "building",
-                            "debugging", "project_structure",
+                            "debugging", "project_structure", "modifiers",
+                            "bridge_setup", "workflows", "troubleshooting",
+                            "multiplayer_networking", "godot_ui_construction",
+                            "reflection_patterns", "advanced_harmony",
+                            "save_file_format", "game_log_parsing",
+                            "combat_deep_dive", "custom_keywords_and_piles",
+                            "mod_config_integration", "resource_loading",
+                            "rng_and_determinism", "accessibility_patterns",
+                            "image_generation", "testing", "autoslay",
+                            "enchantments", "orbs", "game_actions",
+                            "overlays", "dynamic_vars", "mechanics",
+                            "vfx_scenes",
                         ],
                     },
                 },
@@ -213,6 +237,11 @@ async def list_tools() -> list[types.Tool]:
                     "author": {"type": "string", "description": "Author name"},
                     "description": {"type": "string", "description": "Mod description"},
                     "output_dir": {"type": "string", "description": "Output directory (default: game_dir/mod_projects/mod_name)"},
+                    "use_baselib": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Use BaseLib-enabled scaffolds and project layout when possible",
+                    },
                 },
                 "required": ["mod_name", "author"],
             },
@@ -265,6 +294,7 @@ async def list_tools() -> list[types.Tool]:
                     "trigger_hook": {"type": "string", "description": "Primary hook method (e.g. 'AfterDamageReceived', 'BeforeCombatStart')"},
                     "description": {"type": "string"},
                     "flavor": {"type": "string"},
+                    "use_baselib": {"type": "boolean", "default": True},
                 },
                 "required": ["mod_namespace", "class_name"],
             },
@@ -285,6 +315,11 @@ async def list_tools() -> list[types.Tool]:
                     "stack_type": {"type": "string", "enum": ["Counter", "Single"], "default": "Counter"},
                     "trigger_hook": {"type": "string", "description": "Primary hook method"},
                     "description": {"type": "string"},
+                    "use_baselib": {"type": "boolean", "default": True},
+                    "mod_name": {
+                        "type": "string",
+                        "description": "Optional mod root name for resource-linked power icon paths",
+                    },
                 },
                 "required": ["mod_namespace", "class_name"],
             },
@@ -303,6 +338,7 @@ async def list_tools() -> list[types.Tool]:
                     "pool": {"type": "string", "default": "SharedPotionPool"},
                     "block": {"type": "integer", "default": 0},
                     "description": {"type": "string"},
+                    "use_baselib": {"type": "boolean", "default": True},
                 },
                 "required": ["mod_namespace", "class_name"],
             },
@@ -480,11 +516,16 @@ async def list_tools() -> list[types.Tool]:
         # ── Build & Deploy Tools ──
         types.Tool(
             name="build_mod",
-            description="Build a mod project using 'dotnet build'. Returns build output and success status.",
+            description=(
+                "Build a mod project using project-aware defaults from its .csproj and manifest. "
+                "Can optionally build the project's PCK artifact in the same call."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "project_dir": {"type": "string", "description": "Path to mod project directory"},
+                    "configuration": {"type": "string", "default": "Debug"},
+                    "build_pck_artifact": {"type": "boolean", "default": False},
                 },
                 "required": ["project_dir"],
             },
@@ -499,6 +540,8 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "project_dir": {"type": "string", "description": "Path to mod project directory"},
                     "mod_name": {"type": "string", "description": "Override mod folder name (default: from manifest)"},
+                    "configuration": {"type": "string", "default": "Debug"},
+                    "include_pck": {"type": "boolean", "description": "Copy the project PCK if present/expected"},
                 },
                 "required": ["project_dir"],
             },
@@ -620,6 +663,150 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["char_id", "mod_name"],
             },
         ),
+        # ── GDRE Tools (Godot RE — game asset extraction & analysis) ──
+        types.Tool(
+            name="list_game_assets",
+            description=(
+                "List all files inside the game's Godot PCK archive (SlayTheSpire2.pck). "
+                "Shows every res:// path the game uses — scenes, textures, scripts, resources, audio, etc. "
+                "Use to discover asset paths for modding, find scene structures, or understand game layout. "
+                "Requires gdre_tools binary (see GDRE_TOOLS_PATH env var)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "filter_ext": {
+                        "type": "string",
+                        "description": "Filter by file extension (e.g. '.tscn', '.gd', '.tres', '.png', '.ogg')",
+                    },
+                    "filter_glob": {
+                        "type": "string",
+                        "description": "Glob pattern to filter paths (e.g. '**/Cards/**', '*.gdc')",
+                    },
+                },
+            },
+        ),
+        types.Tool(
+            name="search_game_assets",
+            description=(
+                "Search game asset paths by substring. Fast in-memory search across all files in the game PCK. "
+                "Use to find specific assets by name — e.g. search 'Bash' to find all assets related to the Bash card, "
+                "or 'character_select' to find character selection scenes."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Substring to search for in asset paths (case-insensitive)",
+                    },
+                    "extensions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional extension filter (e.g. ['.tscn', '.tres'])",
+                    },
+                },
+                "required": ["pattern"],
+            },
+        ),
+        types.Tool(
+            name="extract_game_assets",
+            description=(
+                "Extract files from the game PCK to a local directory for analysis. "
+                "Can extract everything, filter by glob pattern, or extract only scripts. "
+                "Useful for examining game scenes, understanding node hierarchies, or getting reference textures."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "output_dir": {
+                        "type": "string",
+                        "description": "Directory to extract files into",
+                    },
+                    "include": {
+                        "type": "string",
+                        "description": "Glob pattern for files to include (e.g. 'res://**/*.tscn', 'res://Scenes/Cards/**')",
+                    },
+                    "exclude": {
+                        "type": "string",
+                        "description": "Glob pattern for files to exclude",
+                    },
+                    "scripts_only": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Only extract script files (.gd, .gdc)",
+                    },
+                },
+                "required": ["output_dir"],
+            },
+        ),
+        types.Tool(
+            name="recover_game_project",
+            description=(
+                "Full Godot project recovery from the game PCK — the asset-side equivalent of decompile_game. "
+                "Extracts all assets, decompiles GDScript bytecode to readable .gd, and converts binary "
+                "scenes/resources to text format (.tscn/.tres). Run once after game install or major update."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "output_dir": {
+                        "type": "string",
+                        "description": "Directory to recover the project into (default: recovered/ next to decompiled/)",
+                    },
+                },
+            },
+        ),
+        types.Tool(
+            name="decompile_gdscript",
+            description=(
+                "Decompile GDScript bytecode (.gdc) files to readable source (.gd). "
+                "Use after extracting .gdc files from the game PCK to understand game scripts."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "input_path": {
+                        "type": "string",
+                        "description": "Path to .gdc file or glob pattern (e.g. 'extracted/**/*.gdc')",
+                    },
+                    "output_dir": {
+                        "type": "string",
+                        "description": "Output directory (default: same directory as input)",
+                    },
+                },
+                "required": ["input_path"],
+            },
+        ),
+        types.Tool(
+            name="convert_resource",
+            description=(
+                "Convert between binary and text Godot resource formats. "
+                "Binary→text: .scn/.res → .tscn/.tres (readable, editable). "
+                "Text→binary: .tscn/.tres → .scn/.res (for packing). "
+                "Essential for understanding game scene node hierarchies and resource structures."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "input_path": {
+                        "type": "string",
+                        "description": "Path to resource file or glob (e.g. 'extracted/**/*.scn')",
+                    },
+                    "output_dir": {
+                        "type": "string",
+                        "description": "Output directory (default: same directory)",
+                    },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["bin_to_txt", "txt_to_bin"],
+                        "default": "bin_to_txt",
+                        "description": "Conversion direction",
+                    },
+                },
+                "required": ["input_path"],
+            },
+        ),
         # ── Live Bridge Tools (require game running with MCPTest mod) ──
         types.Tool(
             name="bridge_ping",
@@ -675,9 +862,9 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="bridge_get_available_actions",
             description=(
-                "Get all currently legal actions: in combat (playable cards with valid targets, end turn), "
-                "on map (available travel destinations with room types), "
-                "plus console command access. Essential for knowing what you can do right now."
+                "Get all currently legal actions across combat and in-run screens: "
+                "combat cards/end turn, map travel, event options, rewards, shops, rest sites, "
+                "treasure, and card selection overlays."
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
@@ -685,13 +872,33 @@ async def list_tools() -> list[types.Tool]:
             name="bridge_start_run",
             description=(
                 "Start a new singleplayer run. Characters: Ironclad, Silent, Regent, Necrobinder, Defect. "
-                "Requires game at main menu (no run in progress)."
+                "Supports deterministic seeds, optional modifiers/act lists, and fixture commands "
+                "for rapid test setup immediately after the run starts."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "character": {"type": "string", "default": "Ironclad"},
                     "ascension": {"type": "integer", "default": 0},
+                    "seed": {"type": "string", "description": "Deterministic run seed"},
+                    "fixture": {
+                        "type": "object",
+                        "description": "Optional bridge fixture payload for deterministic setup",
+                    },
+                    "modifiers": {"type": "array", "items": {"type": "string"}},
+                    "acts": {"type": "array", "items": {"type": "string"}},
+                    "relics": {"type": "array", "items": {"type": "string"}},
+                    "cards": {"type": "array", "items": {"type": "string"}},
+                    "potions": {"type": "array", "items": {"type": "string"}},
+                    "powers": {"type": "array", "items": {"type": "object"}},
+                    "gold": {"type": "integer"},
+                    "hp": {"type": "integer"},
+                    "energy": {"type": "integer"},
+                    "draw_cards": {"type": "integer"},
+                    "fight": {"type": "string"},
+                    "event": {"type": "string"},
+                    "godmode": {"type": "boolean", "default": False},
+                    "fixture_commands": {"type": "array", "items": {"type": "string"}},
                 },
             },
         ),
@@ -734,6 +941,1469 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["command"],
             },
         ),
+        # ── New Generators ──
+        types.Tool(
+            name="generate_event",
+            description=(
+                "Generate a custom event class with a choice tree. Events are narrative encounters "
+                "with player choices (accept/refuse/leave). Generates EventModel subclass with "
+                "EventOption yields and choice handler methods."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                    "class_name": {"type": "string", "description": "Event class name (PascalCase, e.g. 'MysteriousAltar')"},
+                    "is_shared": {"type": "boolean", "default": False, "description": "All players see same event (multiplayer)"},
+                    "choices": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string", "description": "Choice text shown to player"},
+                                "method_name": {"type": "string", "description": "Handler method name"},
+                                "effect_description": {"type": "string", "description": "What this choice does"},
+                            },
+                            "required": ["label", "method_name"],
+                        },
+                        "description": "List of event choices",
+                    },
+                },
+                "required": ["mod_namespace", "class_name"],
+            },
+        ),
+        types.Tool(
+            name="generate_ancient",
+            description=(
+                "Generate a BaseLib CustomAncientModel scaffold with option pools and localization."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                    "class_name": {"type": "string"},
+                    "option_relics": {"type": "array", "items": {"type": "string"}},
+                    "min_act_number": {"type": "integer", "default": 2},
+                },
+                "required": ["mod_namespace", "class_name"],
+            },
+        ),
+        types.Tool(
+            name="generate_orb",
+            description=(
+                "Generate a custom orb class (Defect character mechanic). Orbs sit in slots and have two effects: "
+                "Passive triggers automatically at end of each turn, Evoke triggers when pushed out by a new orb "
+                "or manually evoked. Values scale with Focus via ModifyOrbValue(). "
+                "See get_modding_guide topic 'orbs' for patterns and Focus interaction."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                    "class_name": {"type": "string", "description": "Orb class name (PascalCase, e.g. 'PlasmaOrb')"},
+                    "passive_amount": {"type": "integer", "default": 3},
+                    "evoke_amount": {"type": "integer", "default": 9},
+                    "passive_description": {"type": "string"},
+                    "evoke_description": {"type": "string"},
+                },
+                "required": ["mod_namespace", "class_name"],
+            },
+        ),
+        types.Tool(
+            name="generate_enchantment",
+            description=(
+                "Generate a custom enchantment class. Enchantments are card-local modifications that attach "
+                "to specific card instances and trigger via the same hook system as powers/relics. "
+                "Use EnchantedCard property to reference the attached card. Unlike powers (player-wide) "
+                "or upgrades (permanent), enchantments are instance-specific and can be added/removed. "
+                "See get_modding_guide topic 'enchantments' for lifecycle and hook details."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                    "class_name": {"type": "string"},
+                    "trigger_hook": {"type": "string", "description": "Primary hook (e.g. 'ModifyDamageAdditive', 'AfterCardPlayed')"},
+                    "description": {"type": "string"},
+                },
+                "required": ["mod_namespace", "class_name"],
+            },
+        ),
+        types.Tool(
+            name="generate_modifier",
+            description=(
+                "Generate a custom run modifier (Good or Bad) for the custom run screen. "
+                "Includes ModifierModel subclass, registration Harmony patch (to add to ModelDb), "
+                "and LocManager localization patch. Modifiers alter gameplay mechanics like "
+                "rewards, card pools, relic acquisition, and run setup."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                    "class_name": {"type": "string", "description": "Modifier class name (PascalCase, e.g. 'Famine', 'VintagePlus')"},
+                    "modifier_type": {"type": "string", "enum": ["Good", "Bad"], "default": "Bad"},
+                    "description": {"type": "string", "description": "What the modifier does (shown to player)"},
+                    "hook": {
+                        "type": "string",
+                        "description": "Primary lifecycle hook",
+                        "enum": [
+                            "TryModifyRewardsLate", "AfterRunCreated",
+                            "ModifyCardRewardCreationOptions", "ModifyMerchantCardPool",
+                            "GenerateNeowOption",
+                        ],
+                    },
+                },
+                "required": ["mod_namespace", "class_name"],
+            },
+        ),
+        types.Tool(
+            name="generate_create_visuals_patch",
+            description="Generate the CreateVisuals Harmony patch required for static-image custom enemies.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                },
+                "required": ["mod_namespace"],
+            },
+        ),
+        types.Tool(
+            name="generate_act_encounter_patch",
+            description="Generate a patch that injects a custom encounter into an act's encounter pool.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                    "class_name": {"type": "string"},
+                    "act_class": {"type": "string"},
+                    "encounter_class": {"type": "string"},
+                },
+                "required": ["mod_namespace", "class_name", "act_class", "encounter_class"],
+            },
+        ),
+        types.Tool(
+            name="generate_game_action",
+            description=(
+                "Generate a custom GameAction class for queuing multi-step combat effects on the game's "
+                "action queue. Use GameAction (instead of direct await) when you need effects to interleave "
+                "with other queued actions, execute between turns, or sync over multiplayer. "
+                "Enqueue via RunManager.Instance.ActionQueueSynchronizer.RequestEnqueue(). "
+                "See get_modding_guide topic 'game_actions' for when to use vs. direct effects."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                    "class_name": {"type": "string"},
+                    "description": {"type": "string"},
+                    "parameters": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "type": {"type": "string"},
+                            },
+                            "required": ["name", "type"],
+                        },
+                    },
+                },
+                "required": ["mod_namespace", "class_name"],
+            },
+        ),
+        # ── Mod Composition Tools ──
+        types.Tool(
+            name="generate_mechanic",
+            description=(
+                "Generate a complete cross-cutting keyword mechanic spanning multiple entity types: "
+                "a tracking PowerModel (holds stacks, implements the effect), a sample card that applies it, "
+                "a sample relic that rewards/synergizes with it, and all localization entries. "
+                "Use this for new mechanics like Poison, Mantra, or Vulnerable — concepts that need "
+                "a power + cards + relics working together. For single entities, use the individual generators instead. "
+                "See get_modding_guide topic 'mechanics' for design patterns (threshold, tick-down, modifier)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                    "mod_name": {"type": "string", "description": "Mod folder name"},
+                    "keyword_name": {"type": "string", "description": "Mechanic/keyword name (e.g. 'Resonance', 'Fury')"},
+                    "keyword_description": {"type": "string", "description": "What the mechanic does"},
+                    "sample_card_name": {"type": "string", "description": "Name for the sample card (default: KeywordStrike)"},
+                    "sample_relic_name": {"type": "string", "description": "Name for the sample relic (default: KeywordTalisman)"},
+                },
+                "required": ["mod_namespace", "mod_name", "keyword_name"],
+            },
+        ),
+        types.Tool(
+            name="validate_mod",
+            description=(
+                "Validate a mod project for common issues before building. Checks performed: "
+                "(1) mod_manifest.json exists and is valid JSON, "
+                "(2) .csproj has correct target framework and references, "
+                "(3) at least one class has [ModInitializer] attribute, "
+                "(4) localization files exist for all generated entities, "
+                "(5) Harmony patches target valid methods with correct signatures, "
+                "(6) async methods properly await and don't fire-and-forget. "
+                "Returns a list of warnings and errors with file paths and line numbers."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_dir": {"type": "string", "description": "Path to mod project directory"},
+                },
+                "required": ["project_dir"],
+            },
+        ),
+        types.Tool(
+            name="generate_custom_tooltip",
+            description=(
+                "Generate a custom keyword tooltip that appears on hover in card/relic descriptions. "
+                "Creates a Harmony patch that registers the keyword with HoverTipManager."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                    "tag_name": {"type": "string", "description": "Rich text tag name (e.g. 'fury' for [fury]Fury[/fury])"},
+                    "title": {"type": "string", "description": "Keyword display name"},
+                    "tooltip_description": {"type": "string", "description": "Hover tooltip text"},
+                },
+                "required": ["mod_namespace", "tag_name", "title", "tooltip_description"],
+            },
+        ),
+        types.Tool(
+            name="generate_save_data",
+            description=(
+                "Generate a save data class for persisting mod state across sessions. "
+                "Data is stored as JSON at %APPDATA%/.sts2mods/{mod_id}/save_data.json."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                    "mod_id": {"type": "string", "description": "Mod identifier"},
+                    "class_name": {"type": "string", "default": "ModSaveData"},
+                    "fields": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "type": {"type": "string", "description": "C# type: int, string, bool, double, List<string>"},
+                                "default": {"type": "string", "description": "Default value expression"},
+                            },
+                            "required": ["name", "type", "default"],
+                        },
+                    },
+                },
+                "required": ["mod_namespace", "mod_id"],
+            },
+        ),
+        types.Tool(
+            name="generate_test_scenario",
+            description=(
+                "Generate a console command sequence for testing a specific game state. "
+                "Outputs commands to add relics, cards, gold, powers, start fights, etc."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "scenario_name": {"type": "string"},
+                    "relics": {"type": "array", "items": {"type": "string"}, "description": "Relics to add"},
+                    "cards": {"type": "array", "items": {"type": "string"}, "description": "Cards to add to hand"},
+                    "gold": {"type": "integer", "description": "Gold to give"},
+                    "hp": {"type": "integer", "description": "HP to heal"},
+                    "powers": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "stacks": {"type": "integer", "default": 1},
+                                "target": {"type": "integer", "default": 0},
+                            },
+                            "required": ["name"],
+                        },
+                    },
+                    "fight": {"type": "string", "description": "Encounter to start"},
+                    "event": {"type": "string", "description": "Event to trigger"},
+                    "godmode": {"type": "boolean", "default": False},
+                },
+                "required": ["scenario_name"],
+            },
+        ),
+        types.Tool(
+            name="generate_vfx_scene",
+            description=(
+                "Generate a Godot .tscn scene file with GPUParticles2D for combat visual effects. "
+                "Creates a particle system scene to pack into your mod's PCK and load at runtime via "
+                "GD.Load<PackedScene>(\"res://YourMod/vfx/name.tscn\"). Configure particle count, "
+                "lifetime, one_shot (burst vs. loop), and explosiveness (spread vs. instant). "
+                "See get_modding_guide topic 'vfx_scenes' for loading patterns and common VFX recipes."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "node_name": {"type": "string", "description": "Scene root node name"},
+                    "particle_count": {"type": "integer", "default": 30},
+                    "lifetime": {"type": "number", "default": 0.5},
+                    "one_shot": {"type": "boolean", "default": True},
+                    "explosiveness": {"type": "number", "default": 0.8},
+                },
+                "required": ["node_name"],
+            },
+        ),
+        # ── Code Intelligence Tools ──
+        types.Tool(
+            name="suggest_patches",
+            description=(
+                "Given a desired behavior change in natural language (e.g. 'make all attacks cost 1 less energy', "
+                "'double poison damage', 'add a card to the reward screen'), analyze decompiled game source "
+                "and suggest which methods to Harmony patch. Returns target class, method name, patch type "
+                "(Prefix/Postfix/Transpiler), rationale, and a code sketch. Works best for specific, "
+                "concrete behavior changes. For broad changes, break them into specific sub-behaviors first."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "desired_behavior": {"type": "string", "description": "What you want to change (natural language)"},
+                    "max_suggestions": {"type": "integer", "default": 10},
+                },
+                "required": ["desired_behavior"],
+            },
+        ),
+        types.Tool(
+            name="analyze_method_callers",
+            description=(
+                "Show the call graph for a game method: who calls it, what it calls, "
+                "and which classes override it. Essential for understanding patch side effects."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "class_name": {"type": "string", "description": "Class containing the method"},
+                    "method_name": {"type": "string", "description": "Method to analyze"},
+                    "max_results": {"type": "integer", "default": 30},
+                },
+                "required": ["class_name", "method_name"],
+            },
+        ),
+        types.Tool(
+            name="get_entity_relationships",
+            description=(
+                "Show what other entities a game entity interacts with: powers it applies, "
+                "cards it references, commands it uses, hooks it implements. "
+                "Map the dependency graph for any card, relic, power, monster, etc."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "entity_name": {"type": "string", "description": "Entity class name (e.g. 'Bash', 'StrengthPower', 'JawWorm')"},
+                },
+                "required": ["entity_name"],
+            },
+        ),
+        types.Tool(
+            name="search_hooks_by_signature",
+            description=(
+                "Search game hooks by parameter type. Answer questions like "
+                "'What hooks give me access to CombatState?' or 'Which hooks receive a CardModel?'"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "param_type": {"type": "string", "description": "Parameter type to search for (e.g. 'CombatState', 'CardModel', 'DamageResult')"},
+                },
+                "required": ["param_type"],
+            },
+        ),
+        types.Tool(
+            name="get_hook_signature",
+            description="Return a hook's full signature plus a ready-to-paste override stub for generator workflows.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "hook_name": {"type": "string"},
+                },
+                "required": ["hook_name"],
+            },
+        ),
+        types.Tool(
+            name="analyze_build_output",
+            description="Parse dotnet build stdout/stderr into structured compiler errors and warnings.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "stdout": {"type": "string"},
+                    "stderr": {"type": "string"},
+                },
+            },
+        ),
+        # ── Game Update Resilience ──
+        types.Tool(
+            name="diff_game_versions",
+            description=(
+                "Compare two decompiled source directories to find API changes after a game update. "
+                "Shows added/removed files, changed hooks, changed public methods."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "old_decompiled_dir": {"type": "string", "description": "Path to old decompiled source"},
+                    "new_decompiled_dir": {"type": "string", "description": "Path to new decompiled source"},
+                },
+                "required": ["old_decompiled_dir", "new_decompiled_dir"],
+            },
+        ),
+        types.Tool(
+            name="check_mod_compatibility",
+            description=(
+                "Check if a mod's code references any APIs that changed in the latest game version. "
+                "Verifies Harmony patch targets, base classes, ModelDb references, and hook signatures."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_dir": {"type": "string", "description": "Path to mod project directory"},
+                },
+                "required": ["project_dir"],
+            },
+        ),
+        types.Tool(
+            name="list_game_vfx",
+            description=(
+                "List VFX-related classes, particle systems, and animation references in the game. "
+                "Use to find existing VFX to reuse in your mod."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Optional filter query", "default": ""},
+                },
+            },
+        ),
+        # ── Extended Bridge Tools ──
+        types.Tool(
+            name="bridge_use_potion",
+            description=(
+                "Use a potion from the player's potion slots. Specify potion_index (0-based) "
+                "and target_index for targeted potions. Use bridge_get_player_state to see potions."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "potion_index": {"type": "integer", "description": "Potion slot index (0-based)"},
+                    "target_index": {"type": "integer", "default": -1, "description": "Target enemy index for targeted potions"},
+                },
+                "required": ["potion_index"],
+            },
+        ),
+        types.Tool(
+            name="bridge_make_event_choice",
+            description=(
+                "Select a choice in the current event. Requires being on the EVENT screen. "
+                "choice_index is 0-based. Use bridge_get_screen to verify you're in an event."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "choice_index": {"type": "integer", "description": "Event choice index (0-based)"},
+                },
+                "required": ["choice_index"],
+            },
+        ),
+        types.Tool(
+            name="bridge_navigate_map",
+            description=(
+                "Travel to a map node by row and column. Requires being on the MAP screen. "
+                "Use bridge_get_map_state to see available nodes."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "row": {"type": "integer", "description": "Map node row"},
+                    "col": {"type": "integer", "description": "Map node column"},
+                },
+                "required": ["row", "col"],
+            },
+        ),
+        types.Tool(
+            name="bridge_rest_site_choice",
+            description=(
+                "Make a choice at a rest site. Options: 'rest' (heal), 'smith' (upgrade card), 'recall'."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "choice": {"type": "string", "enum": ["rest", "smith", "recall"], "description": "Rest site action"},
+                },
+                "required": ["choice"],
+            },
+        ),
+        types.Tool(
+            name="bridge_shop_action",
+            description=(
+                "Perform a shop action: buy a card, relic, or potion by index, or remove a card."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["buy_card", "buy_relic", "buy_potion", "remove_card"]},
+                    "index": {"type": "integer", "default": 0, "description": "Item index (0-based)"},
+                },
+                "required": ["action"],
+            },
+        ),
+        types.Tool(
+            name="bridge_get_card_piles",
+            description=(
+                "Get detailed contents of all card piles in combat: hand, draw pile, "
+                "discard pile, and exhaust pile. Each card includes name, type, cost, upgraded status."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_manipulate_state",
+            description=(
+                "Apply state changes for testing. Set HP, gold, energy, draw cards, add relics/cards/powers, "
+                "start fights, enable godmode. A test harness for rapid mod iteration."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "hp": {"type": "integer", "description": "Heal this amount"},
+                    "gold": {"type": "integer", "description": "Add this much gold"},
+                    "energy": {"type": "integer", "description": "Add energy charges"},
+                    "draw_cards": {"type": "integer", "description": "Draw N cards"},
+                    "add_relic": {"type": "string", "description": "Relic ID to add"},
+                    "add_card": {"type": "string", "description": "Card ID to add to hand"},
+                    "add_power": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "stacks": {"type": "integer", "default": 1},
+                            "target": {"type": "integer", "default": 0},
+                        },
+                    },
+                    "fight": {"type": "string", "description": "Start encounter by ID"},
+                    "godmode": {"type": "boolean", "description": "Toggle invincibility"},
+                },
+            },
+        ),
+        # ── Live Coding & Iteration Tools ──
+        types.Tool(
+            name="bridge_hot_swap_patches",
+            description=(
+                "Hot-swap Harmony patches from a new DLL without restarting the game. "
+                "Unpatches all existing patches and re-applies from the specified assembly. "
+                "Enables rapid iteration on patch-based mods."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dll_path": {
+                        "type": "string",
+                        "description": "Absolute path to the new DLL containing Harmony patches",
+                    },
+                },
+                "required": ["dll_path"],
+            },
+        ),
+        types.Tool(
+            name="bridge_set_game_speed",
+            description=(
+                "Set the game speed multiplier for faster testing. "
+                "1.0 = normal, 2.0 = double speed, 10.0 = 10x speed, 0.5 = half speed. "
+                "Range: 0.1 to 20.0. Use high values to quickly test through combat sequences."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "speed": {
+                        "type": "number",
+                        "description": "Speed multiplier (0.1 to 20.0, default 1.0)",
+                        "default": 1.0,
+                    },
+                },
+                "required": ["speed"],
+            },
+        ),
+        types.Tool(
+            name="bridge_restart_run",
+            description=(
+                "Restart a run using the same parameters as the last bridge_start_run call. "
+                "Saves time by not re-specifying character, ascension, seed, fixtures, etc."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_get_state_diff",
+            description=(
+                "Get changes in game state since the last call. First call captures a baseline. "
+                "Subsequent calls return only fields that changed (HP, block, energy, hand, enemies, etc.). "
+                "Useful for verifying the effect of actions without comparing full state dumps."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_get_exceptions",
+            description=(
+                "Get recent unhandled exceptions captured by the bridge mod. "
+                "Catches mod exceptions in real-time including type, message, stack trace, and source."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "max_count": {
+                        "type": "integer",
+                        "description": "Maximum exceptions to return (default 20)",
+                        "default": 20,
+                    },
+                    "since_id": {
+                        "type": "integer",
+                        "description": "Only return exceptions after this ID (for polling)",
+                        "default": 0,
+                    },
+                },
+            },
+        ),
+        types.Tool(
+            name="bridge_get_events",
+            description=(
+                "Get game events since a given event ID. Events include card plays, turn ends, "
+                "run starts, hot swaps, screenshots, and other tracked actions. "
+                "Use since_id for cursor-based polling."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "since_id": {
+                        "type": "integer",
+                        "description": "Return events after this ID (default 0 = all)",
+                        "default": 0,
+                    },
+                    "max_count": {
+                        "type": "integer",
+                        "description": "Maximum events to return (default 100)",
+                        "default": 100,
+                    },
+                },
+            },
+        ),
+        types.Tool(
+            name="bridge_capture_screenshot",
+            description=(
+                "Capture a screenshot of the game window. Saves as PNG. "
+                "Useful for visual verification of UI mods, VFX, and custom scenes."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "save_path": {
+                        "type": "string",
+                        "description": "Path to save the PNG (default: auto-generated in AppData/MCPTest/screenshots/)",
+                    },
+                },
+            },
+        ),
+        types.Tool(
+            name="bridge_save_snapshot",
+            description=(
+                "Save a named snapshot of the current game state. "
+                "Can be restored later with bridge_restore_snapshot for A/B testing."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Snapshot name (default: 'default')",
+                        "default": "default",
+                    },
+                },
+            },
+        ),
+        types.Tool(
+            name="bridge_restore_snapshot",
+            description=(
+                "Restore a previously saved state snapshot by name. "
+                "Re-applies HP, gold, energy via console commands."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Snapshot name to restore (default: 'default')",
+                        "default": "default",
+                    },
+                },
+            },
+        ),
+        # ── Breakpoints & Stepping Tools ──
+        types.Tool(
+            name="bridge_debug_pause",
+            description=(
+                "Pause the game's action processing. The game continues rendering but no more actions "
+                "(card plays, damage, powers, etc.) execute until resumed. Use to inspect state mid-combat."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_debug_resume",
+            description="Resume from a breakpoint or pause. Continues normal game execution.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_debug_step",
+            description=(
+                "Step: resume execution then pause again at the next opportunity. "
+                "In 'action' mode, pauses after the next game action completes. "
+                "In 'turn' mode, pauses at the start of the next player turn. "
+                "After stepping, use bridge_debug_get_context to inspect the game state."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "description": "Step granularity: 'action' (pause after each action) or 'turn' (pause at each player turn)",
+                        "default": "action",
+                        "enum": ["action", "turn"],
+                    },
+                },
+            },
+        ),
+        types.Tool(
+            name="bridge_debug_set_breakpoint",
+            description=(
+                "Set a breakpoint that pauses execution when a condition is met. "
+                "Action breakpoints pause when a specific action type executes (e.g., PlayCardAction, DamageAction). "
+                "Hook breakpoints pause when a specific game hook fires (e.g., BeforeCardPlayed, BeforeDamageReceived). "
+                "Optional conditions can further filter: 'hp<10', 'energy==0', 'round>=3'."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "description": "Breakpoint type: 'action' or 'hook'",
+                        "default": "action",
+                        "enum": ["action", "hook"],
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": (
+                            "What to break on. For action: class name (e.g., 'PlayCardAction', 'DamageAction'). "
+                            "For hook: hook name (e.g., 'BeforeCardPlayed', 'BeforeDamageReceived', 'BeforeDeath', "
+                            "'BeforePlayPhaseStart', 'AfterTurnEnd', 'BeforeRoomEntered')."
+                        ),
+                    },
+                    "condition": {
+                        "type": "string",
+                        "description": "Optional condition: 'hp<10', 'energy==0', 'block>5', 'round>=3', 'gold>500'",
+                    },
+                },
+                "required": ["target"],
+            },
+        ),
+        types.Tool(
+            name="bridge_debug_remove_breakpoint",
+            description="Remove a breakpoint by its ID.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer", "description": "Breakpoint ID to remove"},
+                },
+                "required": ["id"],
+            },
+        ),
+        types.Tool(
+            name="bridge_debug_list_breakpoints",
+            description="List all breakpoints with their IDs, types, targets, conditions, hit counts, and current pause/step state.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_debug_clear_breakpoints",
+            description="Remove all breakpoints and disable step mode.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_debug_get_context",
+            description=(
+                "Get the current breakpoint/pause context. When paused, returns: why execution stopped, "
+                "which breakpoint or step triggered it, the current action type, and a full game state snapshot "
+                "(HP, block, energy, hand, powers, enemies, floor, act, room)."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        # ── Debugging & Logging Tools ──
+        types.Tool(
+            name="bridge_get_game_log",
+            description=(
+                "Get captured game log messages from the game's own logging system. "
+                "Covers all game subsystems (Actions, Network, GameSync, VisualSync, Generic). "
+                "Different from bridge_get_log which reads the bridge mod's log file. "
+                "Supports filtering by log level and message content, and cursor-based polling via since_id."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "max_count": {
+                        "type": "integer",
+                        "description": "Max entries to return (default 100, max 500)",
+                        "default": 100,
+                    },
+                    "since_id": {
+                        "type": "integer",
+                        "description": "Only return entries after this ID (for polling). Default 0 = all.",
+                        "default": 0,
+                    },
+                    "level": {
+                        "type": "string",
+                        "description": "Filter by log level: VeryDebug, Load, Debug, Info, Warn, Error",
+                    },
+                    "contains": {
+                        "type": "string",
+                        "description": "Filter by substring in message (case-insensitive)",
+                    },
+                },
+            },
+        ),
+        types.Tool(
+            name="bridge_set_log_level",
+            description=(
+                "Set game logging verbosity. Can set per-category levels (e.g., Actions→Debug to see "
+                "every game action), the global fallback, or the capture buffer threshold. "
+                "Log levels from most to least verbose: VeryDebug, Load, Debug, Info, Warn, Error. "
+                "Log types: Generic, Network, Actions, GameSync, VisualSync. "
+                "Lowering levels to Debug or VeryDebug enables verbose output for that subsystem."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "description": "Log category to set (Generic, Network, Actions, GameSync, VisualSync). Used with level.",
+                    },
+                    "level": {
+                        "type": "string",
+                        "description": "Level for the specified type (VeryDebug, Load, Debug, Info, Warn, Error)",
+                    },
+                    "global_level": {
+                        "type": "string",
+                        "description": "Set the global fallback level for all types not explicitly configured",
+                    },
+                    "capture_level": {
+                        "type": "string",
+                        "description": "Set minimum level captured into the ring buffer (affects bridge_get_game_log). Default: Info",
+                    },
+                },
+            },
+        ),
+        types.Tool(
+            name="bridge_get_log_levels",
+            description=(
+                "Get current log level settings for all categories, the global level, and the capture threshold. "
+                "Also returns valid type and level names for reference."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_get_diagnostics",
+            description=(
+                "Get comprehensive diagnostics in a single call: current screen, run state (floor/act/room), "
+                "combat state, active screen object shape, current event shape, and recent bridge log lines. "
+                "Useful as a first step when investigating issues."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "log_lines": {
+                        "type": "integer",
+                        "description": "Number of recent log lines to include (default 40, max 200)",
+                        "default": 40,
+                    },
+                },
+            },
+        ),
+        types.Tool(
+            name="bridge_clear_exceptions",
+            description=(
+                "Clear the exception ring buffer. Use before a test run to get a clean baseline, "
+                "then check bridge_get_exceptions afterwards to see only new exceptions."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_clear_events",
+            description=(
+                "Clear the event ring buffer. Use before a test run to get a clean baseline, "
+                "then check bridge_get_events afterwards to see only new events."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        # ── AutoSlay Tools (Built-in Automated Runner) ──
+        types.Tool(
+            name="bridge_autoslay_start",
+            description=(
+                "Start the game's built-in AutoSlay automated runner. "
+                "AutoSlay plays through entire runs automatically — handling combat, events, shops, "
+                "rest sites, rewards, and map navigation with built-in AI. "
+                "Use for: smoke testing mods across many runs, crash/stability testing, "
+                "regression testing with specific seeds, performance profiling. "
+                "Complements manual bridge testing: AutoSlay = fire-and-forget full runs, "
+                "bridge actions = precise step-by-step control."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "character": {
+                        "type": "string",
+                        "description": "Character to play (Ironclad, Silent, Defect, Necrobinder, Regent, etc.)",
+                        "default": "Ironclad",
+                    },
+                    "seed": {
+                        "type": "string",
+                        "description": "Specific seed for deterministic runs. Omit for random seed.",
+                    },
+                    "runs": {
+                        "type": "integer",
+                        "description": "Number of runs to play (default 1). Each run plays to completion or failure.",
+                        "default": 1,
+                    },
+                    "loop": {
+                        "type": "boolean",
+                        "description": "If true, run indefinitely until stopped with bridge_autoslay_stop.",
+                        "default": False,
+                    },
+                },
+            },
+        ),
+        types.Tool(
+            name="bridge_autoslay_stop",
+            description=(
+                "Stop the currently running AutoSlay session. "
+                "The current run will be cancelled and control returns to the main menu."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_autoslay_status",
+            description=(
+                "Get the current AutoSlay status. Returns whether it's running, "
+                "runs completed, current floor/act/room, elapsed time, recent log entries, "
+                "and any errors. Use to monitor progress of automated runs."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_autoslay_configure",
+            description=(
+                "Configure AutoSlay timeouts and behavior before starting runs. "
+                "Settings persist until changed or the game restarts. "
+                "Useful for adjusting for slow mods (increase timeouts) or speed testing (decrease)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "run_timeout_seconds": {
+                        "type": "integer",
+                        "description": "Max seconds for an entire run (default ~1500 / 25min)",
+                    },
+                    "room_timeout_seconds": {
+                        "type": "integer",
+                        "description": "Max seconds per room (default ~120 / 2min)",
+                    },
+                    "screen_timeout_seconds": {
+                        "type": "integer",
+                        "description": "Max seconds per screen/overlay (default ~30)",
+                    },
+                    "polling_interval_ms": {
+                        "type": "integer",
+                        "description": "Polling interval in milliseconds (default ~100)",
+                    },
+                    "watchdog_timeout_seconds": {
+                        "type": "integer",
+                        "description": "Stall detection timeout in seconds (default ~30)",
+                    },
+                    "max_floor": {
+                        "type": "integer",
+                        "description": "Maximum floor to play to (default ~49)",
+                    },
+                },
+            },
+        ),
+        # ── Test Runner Tools ──
+        types.Tool(
+            name="run_test_scenario",
+            description=(
+                "Run an automated test scenario against the live game (requires bridge mod running). "
+                "Structure: {setup: {run params}, steps: [{action, assertions}], verify: {final checks}}. "
+                "Step actions: play_card, end_turn, console, manipulate_state, navigate_map, use_potion, "
+                "make_event_choice, wait_for_screen, wait_idle. "
+                "Assertions check game state: hp, gold, energy, block, hand_size, enemy_N_hp, has_power_X, "
+                "power_X (with operators: eq, gt, lt, gte, lte). "
+                "See get_modding_guide topic 'testing' for full assertion syntax and example scenarios."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "scenario": {
+                        "type": "object",
+                        "description": "Test scenario with name, setup, and steps",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "setup": {
+                                "type": "object",
+                                "description": "Run start params (character, ascension, seed, relics, cards, etc.)",
+                            },
+                            "steps": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "action": {"type": "string", "description": "Action: play_card, end_turn, console, manipulate_state, navigate_map, event_choice, rest_choice, wait, noop"},
+                                        "params": {"type": "object"},
+                                        "assert": {"type": "object", "description": "Assertions: {field: expected_value} or {field: {op: 'gt', value: N}}"},
+                                        "wait_for_screen": {"type": "string"},
+                                        "wait_idle": {"type": "boolean"},
+                                        "delay": {"type": "number"},
+                                        "stop_on_fail": {"type": "boolean", "default": True},
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+                "required": ["scenario"],
+            },
+        ),
+        # ── File Watcher Tools ──
+        types.Tool(
+            name="watch_project",
+            description=(
+                "Start watching a mod project for file changes and auto-rebuild+deploy on save. "
+                "Monitors .cs, .json, .tscn, .tres files. Debounces builds by 1.5s. "
+                "Eliminates the manual build-deploy cycle during development."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_dir": {"type": "string", "description": "Path to the mod project directory"},
+                    "mods_dir": {"type": "string", "description": "Game mods directory path"},
+                    "mod_name": {"type": "string", "description": "Install name override"},
+                    "configuration": {"type": "string", "default": "Debug"},
+                },
+                "required": ["project_dir", "mods_dir"],
+            },
+        ),
+        types.Tool(
+            name="stop_watching",
+            description="Stop the active file watcher for auto-rebuild.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="watcher_status",
+            description="Get the status of the active file watcher (running, build count, last result).",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        # ── Analysis Tools ──
+        types.Tool(
+            name="reverse_hook_lookup",
+            description=(
+                "Find what hooks fire when an entity is used or triggered. "
+                "Inverse of get_entity_relationships: shows hooks relevant to a card/relic/power/monster, "
+                "which hooks the entity overrides, and which hooks accept its base class as a parameter."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "entity_name": {
+                        "type": "string",
+                        "description": "Entity class name (e.g., 'Bash', 'StrengthPower', 'JawWorm')",
+                    },
+                },
+                "required": ["entity_name"],
+            },
+        ),
+        # ── Project Workflow Tools ──
+        types.Tool(
+            name="package_mod",
+            description=(
+                "Package a built mod into a distributable zip archive. "
+                "Includes DLL, manifest, PCK, and mod image."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_dir": {"type": "string", "description": "Path to the mod project"},
+                    "output_path": {"type": "string", "description": "Output zip path (default: project_dir/mod_name.zip)"},
+                },
+                "required": ["project_dir"],
+            },
+        ),
+        types.Tool(
+            name="check_dependencies",
+            description=(
+                "Check mod project dependencies from .csproj. "
+                "Lists NuGet packages, DLL references, and validates they exist on disk."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_dir": {"type": "string", "description": "Path to the mod project"},
+                },
+                "required": ["project_dir"],
+            },
+        ),
+        types.Tool(
+            name="discover_mod_projects",
+            description=(
+                "Discover all mod projects in a workspace directory. "
+                "Finds directories with .csproj files and inspects their mod structure."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "workspace_dir": {"type": "string", "description": "Root directory to search"},
+                },
+                "required": ["workspace_dir"],
+            },
+        ),
+        # ── Advanced Generators ──
+        types.Tool(
+            name="generate_net_message",
+            description=(
+                "Generate a multiplayer network message class implementing INetMessage and IPacketSerializable. "
+                "Used for syncing mod state across players. Supports typed fields with auto-generated "
+                "serialization. Common in multiplayer mods (chat, drawing sync, damage tracking)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                    "class_name": {"type": "string", "description": "Message class name (PascalCase)"},
+                    "transfer_mode": {"type": "string", "enum": ["Reliable", "Unreliable", "ReliableOrdered"], "default": "Reliable"},
+                    "should_broadcast": {"type": "boolean", "default": True},
+                    "fields": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "type": {"type": "string", "enum": ["string", "int", "float", "bool", "decimal"]},
+                            },
+                            "required": ["name", "type"],
+                        },
+                        "description": "Fields to serialize/deserialize",
+                    },
+                },
+                "required": ["mod_namespace", "class_name"],
+            },
+        ),
+        types.Tool(
+            name="generate_godot_ui",
+            description=(
+                "Generate a custom Godot UI panel built programmatically in C#. "
+                "Creates a styled panel with configurable controls (labels, buttons, sliders, checkboxes). "
+                "Used by mods that need custom in-game interfaces without .tscn files."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                    "class_name": {"type": "string", "description": "UI class name (PascalCase)"},
+                    "title": {"type": "string", "default": "My Panel"},
+                    "base_type": {"type": "string", "enum": ["Control", "CanvasLayer", "Node2D"], "default": "Control"},
+                    "controls": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string", "enum": ["Label", "Button", "CheckBox", "Slider"]},
+                                "name": {"type": "string"},
+                                "text": {"type": "string"},
+                            },
+                            "required": ["type", "name"],
+                        },
+                    },
+                    "show_in_process": {"type": "boolean", "default": False, "description": "Add _Process for real-time updates"},
+                },
+                "required": ["mod_namespace", "class_name"],
+            },
+        ),
+        types.Tool(
+            name="generate_settings_panel",
+            description=(
+                "Generate a mod settings class with optional ModConfig integration (via reflection, no hard dependency). "
+                "Falls back to JSON file config if ModConfig isn't installed. "
+                "Supports bool, int, float, and string settings with persistence."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                    "class_name": {"type": "string", "default": "ModSettings"},
+                    "mod_id": {"type": "string", "description": "Mod identifier for config file path"},
+                    "properties": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "type": {"type": "string", "enum": ["bool", "int", "float", "string"]},
+                                "default": {"type": "string"},
+                            },
+                            "required": ["name", "type", "default"],
+                        },
+                    },
+                },
+                "required": ["mod_namespace", "mod_id"],
+            },
+        ),
+        types.Tool(
+            name="generate_hover_tip",
+            description=(
+                "Generate a hover tooltip utility class for showing contextual information. "
+                "Provides static methods to show/hide HoverTip at positions or attached to nodes."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                    "class_name": {"type": "string", "default": "ModHoverTips"},
+                },
+                "required": ["mod_namespace"],
+            },
+        ),
+        types.Tool(
+            name="generate_overlay",
+            description=(
+                "Generate a Godot Control node overlay that auto-injects into a game scene via Harmony patch. "
+                "The overlay updates each frame via _Process() and cleans up automatically when the scene changes. "
+                "Injection targets: NCombatRoom (combat), NMapRoom (map), NShopRoom (shops), NRestSiteRoom, NEventRoom. "
+                "Use for debug displays, stat trackers, custom HUD elements, or mod-specific UI. "
+                "See get_modding_guide topic 'overlays' for positioning and game state access."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                    "class_name": {"type": "string", "description": "Overlay class name"},
+                    "mod_id": {"type": "string", "default": "mymod"},
+                    "overlay_description": {"type": "string", "default": "Custom overlay"},
+                    "inject_target": {"type": "string", "default": "NCombatRoom", "description": "Game node to inject into"},
+                },
+                "required": ["mod_namespace", "class_name"],
+            },
+        ),
+        types.Tool(
+            name="generate_transpiler_patch",
+            description=(
+                "Generate a Harmony IL Transpiler patch for modifying method bytecode. "
+                "More powerful than prefix/postfix — can change specific IL instructions. "
+                "Used for value modifications, conditional injection, and protocol changes."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                    "class_name": {"type": "string", "description": "Patch class name"},
+                    "target_type": {"type": "string", "description": "Class to patch (e.g. 'DamageCmd')"},
+                    "target_method": {"type": "string", "description": "Method to patch (e.g. 'Attack')"},
+                    "description": {"type": "string", "default": ""},
+                    "search_opcode": {"type": "string", "default": "Callvirt"},
+                    "search_method": {"type": "string", "default": ""},
+                    "mod_id": {"type": "string", "default": "mymod"},
+                },
+                "required": ["mod_namespace", "class_name", "target_type", "target_method"],
+            },
+        ),
+        types.Tool(
+            name="generate_reflection_accessor",
+            description=(
+                "Generate a utility class with cached reflection accessors for private fields/properties. "
+                "Uses Harmony's AccessTools for safe access. Essential for mods needing private game state."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                    "class_name": {"type": "string", "description": "Accessor class name (e.g. 'CombatAccessor')"},
+                    "target_type": {"type": "string", "description": "Game class to access (e.g. 'NMapDrawings')"},
+                    "fields": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "description": "Field/property name"},
+                                "type": {"type": "string", "description": "C# type"},
+                                "is_property": {"type": "boolean", "default": False},
+                            },
+                            "required": ["name", "type"],
+                        },
+                    },
+                },
+                "required": ["mod_namespace", "class_name", "target_type"],
+            },
+        ),
+        types.Tool(
+            name="generate_custom_keyword",
+            description=(
+                "Generate a custom card keyword using BaseLib's [CustomEnum] attribute (requires BaseLib dependency). "
+                "Creates a new CardKeyword enum value that can be added to cards via Keywords property "
+                "and shown in tooltips. Use with generate_custom_tooltip to add a hover explanation. "
+                "See get_modding_guide topic 'custom_keywords_and_piles'."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                    "keyword_name": {"type": "string", "description": "Keyword display name (e.g. 'Stitch', 'Woven')"},
+                },
+                "required": ["mod_namespace", "keyword_name"],
+            },
+        ),
+        types.Tool(
+            name="generate_custom_pile",
+            description=(
+                "Generate a custom card pile type using BaseLib's [CustomEnum] attribute (requires BaseLib dependency). "
+                "Creates a new PileType enum value for routing cards to custom locations beyond the standard "
+                "hand/draw/discard/exhaust piles. Use when your mechanic needs a separate card zone. "
+                "See get_modding_guide topic 'custom_keywords_and_piles'."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                    "pile_name": {"type": "string", "description": "Pile name (e.g. 'Stitch', 'Void')"},
+                },
+                "required": ["mod_namespace", "pile_name"],
+            },
+        ),
+        types.Tool(
+            name="generate_spire_field",
+            description=(
+                "Generate a SpireField for attaching custom data to game model instances. "
+                "Like a dictionary keyed by instance — attach ints, bools, or objects to any CardModel, "
+                "Creature, etc. without modifying the class. Requires BaseLib."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                    "class_name": {"type": "string", "description": "Container class name"},
+                    "target_type": {"type": "string", "description": "Game type to attach to (e.g. 'CardModel')"},
+                    "field_name": {"type": "string", "default": "Value"},
+                    "field_type": {"type": "string", "default": "int"},
+                    "default_value": {"type": "string", "default": "0"},
+                },
+                "required": ["mod_namespace", "class_name", "target_type"],
+            },
+        ),
+        types.Tool(
+            name="generate_dynamic_var",
+            description=(
+                "Generate a custom DynamicVar subclass for use in card/power/enchantment descriptions. "
+                "DynamicVars are named numeric values referenced in localization strings as {var_name} that "
+                "resolve at display time and update dynamically (e.g., scaling with Strength via ValueProp.Move). "
+                "Use when built-in vars (MoveVar, BlockVar, MagicVar, UrMagicVar) aren't enough. "
+                "See get_modding_guide topic 'dynamic_vars' for ValueProp options and upgrade integration."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "mod_namespace": {"type": "string"},
+                    "class_name": {"type": "string", "description": "Var class name (e.g. 'FuryVar')"},
+                    "var_name": {"type": "string", "description": "Display name in descriptions"},
+                    "default_value": {"type": "integer", "default": 0},
+                },
+                "required": ["mod_namespace", "class_name", "var_name"],
+            },
+        ),
+        # ── Image Generation & Processing ──
+        types.Tool(
+            name="generate_art",
+            description=(
+                "Generate game art using Google Gemini Nano Banana 2 and process it into "
+                "all required size variants for the given asset type. Produces ready-to-use "
+                "PNG files in the mod project's image directories. "
+                "Requires GOOGLE_API_KEY env var."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "description": {
+                        "type": "string",
+                        "description": "Plain-English description of the desired art (e.g. 'A flaming sword with purple runes')",
+                    },
+                    "asset_type": {
+                        "type": "string",
+                        "enum": ["card", "card_fullscreen", "relic", "power", "character"],
+                        "description": "Type of game asset — determines output sizes and variants",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Asset name used in file paths (e.g. 'flame_slash', 'iron_shell')",
+                    },
+                    "project_dir": {
+                        "type": "string",
+                        "description": "Absolute path to the mod project root directory",
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Optional model override (default: gemini-3.1-flash-image-preview)",
+                    },
+                },
+                "required": ["description", "asset_type", "name", "project_dir"],
+            },
+        ),
+        types.Tool(
+            name="process_art",
+            description=(
+                "Process an existing image file into game-ready variants for a given asset type. "
+                "Handles background removal (for relics/powers), resizing, outline generation, "
+                "and locked-state effects. Use this when you already have source art and just "
+                "need the correctly-sized variants placed into the mod project."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "image_path": {
+                        "type": "string",
+                        "description": "Absolute path to the source image file (PNG, JPG, etc.)",
+                    },
+                    "asset_type": {
+                        "type": "string",
+                        "enum": ["card", "card_fullscreen", "relic", "power", "character"],
+                        "description": "Type of game asset — determines output sizes, variants, and effects",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Asset name used in file paths (e.g. 'flame_slash')",
+                    },
+                    "project_dir": {
+                        "type": "string",
+                        "description": "Absolute path to the mod project root directory",
+                    },
+                },
+                "required": ["image_path", "asset_type", "name", "project_dir"],
+            },
+        ),
+        types.Tool(
+            name="list_art_profiles",
+            description=(
+                "List all supported asset types and their image variant specifications. "
+                "Shows output sizes, file paths, background modes, and effects for each type."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
     ]
 
 
@@ -748,7 +2418,29 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             return [types.TextContent(type="text", text=result)]
         return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
     except Exception as e:
-        return [types.TextContent(type="text", text=f"Error: {type(e).__name__}: {e}")]
+        return [
+            types.TextContent(
+                type="text",
+                text=json.dumps(
+                    {
+                        "success": False,
+                        "error": f"{type(e).__name__}: {e}",
+                        "tool": name,
+                    },
+                    indent=2,
+                ),
+            )
+        ]
+
+
+def _lookup_hook_signature(trigger_hook: str) -> dict | None:
+    if not trigger_hook:
+        return None
+
+    signature = analyzer.get_hook_signature(trigger_hook)
+    if signature.get("found"):
+        return signature
+    return None
 
 
 async def _handle_tool(name: str, args: dict):
@@ -866,6 +2558,7 @@ async def _handle_tool(name: str, args: dict):
         )
 
     elif name == "generate_relic":
+        hook_signature = _lookup_hook_signature(args.get("trigger_hook", ""))
         return mod_gen.generate_relic(
             mod_namespace=args["mod_namespace"],
             class_name=args["class_name"],
@@ -875,9 +2568,11 @@ async def _handle_tool(name: str, args: dict):
             flavor=args.get("flavor", ""),
             trigger_hook=args.get("trigger_hook", ""),
             use_baselib=args.get("use_baselib", True),
+            hook_signature=hook_signature,
         )
 
     elif name == "generate_power":
+        hook_signature = _lookup_hook_signature(args.get("trigger_hook", ""))
         return mod_gen.generate_power(
             mod_namespace=args["mod_namespace"],
             class_name=args["class_name"],
@@ -887,6 +2582,7 @@ async def _handle_tool(name: str, args: dict):
             trigger_hook=args.get("trigger_hook", ""),
             use_baselib=args.get("use_baselib", True),
             mod_name=args.get("mod_name", ""),
+            hook_signature=hook_signature,
         )
 
     elif name == "generate_potion":
@@ -964,12 +2660,18 @@ async def _handle_tool(name: str, args: dict):
 
     # ── Build & Deploy ──
     elif name == "build_mod":
-        return mod_gen.build_mod(args["project_dir"])
+        return mod_gen.build_mod(
+            args["project_dir"],
+            configuration=args.get("configuration", "Debug"),
+            build_pck_artifact=args.get("build_pck_artifact", False),
+        )
 
     elif name == "install_mod":
         return mod_gen.install_mod(
             args["project_dir"],
             mod_name=args.get("mod_name", ""),
+            configuration=args.get("configuration", "Debug"),
+            include_pck=args.get("include_pck"),
         )
 
     elif name == "uninstall_mod":
@@ -1014,56 +2716,647 @@ async def _handle_tool(name: str, args: dict):
             mod_name=args["mod_name"],
         )
 
+    # ── GDRE Tools ──
+    elif name == "list_game_assets":
+        return await asyncio.to_thread(
+            gdre_tools.list_game_assets,
+            GAME_DIR,
+            filter_glob=args.get("filter_glob", ""),
+            filter_ext=args.get("filter_ext", ""),
+        )
+
+    elif name == "search_game_assets":
+        return await asyncio.to_thread(
+            gdre_tools.search_game_assets,
+            GAME_DIR,
+            pattern=args["pattern"],
+            extensions=args.get("extensions"),
+        )
+
+    elif name == "extract_game_assets":
+        return await asyncio.to_thread(
+            gdre_tools.extract_game_assets,
+            GAME_DIR,
+            output_dir=args["output_dir"],
+            include=args.get("include", ""),
+            exclude=args.get("exclude", ""),
+            scripts_only=args.get("scripts_only", False),
+        )
+
+    elif name == "recover_game_project":
+        output_dir = args.get("output_dir", "")
+        if not output_dir:
+            output_dir = os.path.join(os.path.dirname(DECOMPILED_DIR), "recovered")
+        return await asyncio.to_thread(
+            gdre_tools.recover_game_project,
+            GAME_DIR,
+            output_dir=output_dir,
+        )
+
+    elif name == "decompile_gdscript":
+        return await asyncio.to_thread(
+            gdre_tools.decompile_gdscript,
+            input_path=args["input_path"],
+            output_dir=args.get("output_dir", ""),
+        )
+
+    elif name == "convert_resource":
+        return await asyncio.to_thread(
+            gdre_tools.convert_resource,
+            input_path=args["input_path"],
+            output_dir=args.get("output_dir", ""),
+            direction=args.get("direction", "bin_to_txt"),
+        )
+
     # ── Live Bridge ──
     elif name == "bridge_ping":
         from . import bridge_client
-        return bridge_client.ping()
+        return await _call_bridge(bridge_client.ping)
 
     elif name == "bridge_get_screen":
         from . import bridge_client
-        return bridge_client.get_screen()
+        return await _call_bridge(bridge_client.get_screen)
 
     elif name == "bridge_get_run_state":
         from . import bridge_client
-        return bridge_client.get_run_state()
+        return await _call_bridge(bridge_client.get_run_state)
 
     elif name == "bridge_get_combat_state":
         from . import bridge_client
-        return bridge_client.get_combat_state()
+        return await _call_bridge(bridge_client.get_combat_state)
 
     elif name == "bridge_get_player_state":
         from . import bridge_client
-        return bridge_client.get_player_state()
+        return await _call_bridge(bridge_client.get_player_state)
 
     elif name == "bridge_get_map_state":
         from . import bridge_client
-        return bridge_client.get_map_state()
+        return await _call_bridge(bridge_client.get_map_state)
 
     elif name == "bridge_get_available_actions":
         from . import bridge_client
-        return bridge_client.get_available_actions()
+        return await _call_bridge(bridge_client.get_available_actions)
 
     elif name == "bridge_play_card":
         from . import bridge_client
-        return bridge_client.play_card(
+        return await _call_bridge(
+            bridge_client.play_card,
             card_index=args["card_index"],
             target_index=args.get("target_index", -1),
         )
 
     elif name == "bridge_end_turn":
         from . import bridge_client
-        return bridge_client.end_turn()
+        return await _call_bridge(bridge_client.end_turn)
 
     elif name == "bridge_start_run":
         from . import bridge_client
-        return bridge_client.start_run(
+        return await _call_bridge(
+            bridge_client.start_run,
             character=args.get("character", "Ironclad"),
             ascension=args.get("ascension", 0),
+            seed=args.get("seed"),
+            fixture=args.get("fixture"),
+            modifiers=args.get("modifiers"),
+            acts=args.get("acts"),
+            relics=args.get("relics"),
+            cards=args.get("cards"),
+            potions=args.get("potions"),
+            powers=args.get("powers"),
+            gold=args.get("gold"),
+            hp=args.get("hp"),
+            energy=args.get("energy"),
+            draw_cards=args.get("draw_cards"),
+            fight=args.get("fight"),
+            event=args.get("event"),
+            godmode=args.get("godmode", False),
+            fixture_commands=args.get("fixture_commands"),
         )
 
     elif name == "bridge_console":
         from . import bridge_client
-        return bridge_client.execute_console_command(args["command"])
+        return await _call_bridge(bridge_client.execute_console_command, args["command"])
+
+    # ── New Generators ──
+    elif name == "generate_event":
+        return mod_gen.generate_event(
+            mod_namespace=args["mod_namespace"],
+            class_name=args["class_name"],
+            is_shared=args.get("is_shared", False),
+            choices=args.get("choices"),
+        )
+
+    elif name == "generate_orb":
+        return mod_gen.generate_orb(
+            mod_namespace=args["mod_namespace"],
+            class_name=args["class_name"],
+            passive_amount=args.get("passive_amount", 3),
+            evoke_amount=args.get("evoke_amount", 9),
+            passive_description=args.get("passive_description", ""),
+            evoke_description=args.get("evoke_description", ""),
+        )
+
+    elif name == "generate_enchantment":
+        hook_signature = _lookup_hook_signature(args.get("trigger_hook", ""))
+        return mod_gen.generate_enchantment(
+            mod_namespace=args["mod_namespace"],
+            class_name=args["class_name"],
+            trigger_hook=args.get("trigger_hook", ""),
+            description=args.get("description", ""),
+            hook_signature=hook_signature,
+        )
+
+    elif name == "generate_modifier":
+        return mod_gen.generate_modifier(
+            mod_namespace=args["mod_namespace"],
+            class_name=args["class_name"],
+            modifier_type=args.get("modifier_type", "Bad"),
+            description=args.get("description", ""),
+            hook=args.get("hook", ""),
+        )
+
+    elif name == "generate_ancient":
+        return mod_gen.generate_ancient(
+            mod_namespace=args["mod_namespace"],
+            class_name=args["class_name"],
+            option_relics=args.get("option_relics"),
+            min_act_number=args.get("min_act_number", 2),
+        )
+
+    elif name == "generate_create_visuals_patch":
+        return mod_gen.generate_create_visuals_patch(
+            mod_namespace=args["mod_namespace"],
+        )
+
+    elif name == "generate_act_encounter_patch":
+        return mod_gen.generate_act_encounter_patch(
+            mod_namespace=args["mod_namespace"],
+            class_name=args["class_name"],
+            act_class=args["act_class"],
+            encounter_class=args["encounter_class"],
+        )
+
+    elif name == "generate_game_action":
+        return mod_gen.generate_game_action(
+            mod_namespace=args["mod_namespace"],
+            class_name=args["class_name"],
+            description=args.get("description", ""),
+            parameters=args.get("parameters"),
+        )
+
+    elif name == "generate_mechanic":
+        return mod_gen.generate_mechanic(
+            mod_namespace=args["mod_namespace"],
+            mod_name=args["mod_name"],
+            keyword_name=args["keyword_name"],
+            keyword_description=args.get("keyword_description", ""),
+            sample_card_name=args.get("sample_card_name", ""),
+            sample_relic_name=args.get("sample_relic_name", ""),
+        )
+
+    elif name == "generate_custom_tooltip":
+        return mod_gen.generate_custom_tooltip(
+            mod_namespace=args["mod_namespace"],
+            tag_name=args["tag_name"],
+            title=args["title"],
+            tooltip_description=args["tooltip_description"],
+        )
+
+    elif name == "generate_save_data":
+        return mod_gen.generate_save_data(
+            mod_namespace=args["mod_namespace"],
+            mod_id=args["mod_id"],
+            class_name=args.get("class_name", "ModSaveData"),
+            fields=args.get("fields"),
+        )
+
+    elif name == "generate_test_scenario":
+        return mod_gen.generate_test_scenario(
+            scenario_name=args["scenario_name"],
+            relics=args.get("relics"),
+            cards=args.get("cards"),
+            gold=args.get("gold", 0),
+            hp=args.get("hp", 0),
+            powers=args.get("powers"),
+            fight=args.get("fight", ""),
+            event=args.get("event", ""),
+            godmode=args.get("godmode", False),
+        )
+
+    elif name == "generate_vfx_scene":
+        return mod_gen.generate_vfx_scene(
+            node_name=args["node_name"],
+            particle_count=args.get("particle_count", 30),
+            lifetime=args.get("lifetime", 0.5),
+            one_shot=args.get("one_shot", True),
+            explosiveness=args.get("explosiveness", 0.8),
+        )
+
+    # ── Code Intelligence ──
+    elif name == "suggest_patches":
+        return analyzer.suggest_patches(
+            desired_behavior=args["desired_behavior"],
+            max_suggestions=args.get("max_suggestions", 10),
+        )
+
+    elif name == "analyze_method_callers":
+        return analyzer.analyze_method_callers(
+            class_name=args["class_name"],
+            method_name=args["method_name"],
+            max_results=args.get("max_results", 30),
+        )
+
+    elif name == "get_entity_relationships":
+        return analyzer.get_entity_relationships(args["entity_name"])
+
+    elif name == "search_hooks_by_signature":
+        results = analyzer.search_hooks_by_signature(args["param_type"])
+        return {"count": len(results), "hooks": results}
+
+    elif name == "get_hook_signature":
+        return analyzer.get_hook_signature(args["hook_name"])
+
+    elif name == "analyze_build_output":
+        return analyzer.analyze_build_output(
+            stdout=args.get("stdout", ""),
+            stderr=args.get("stderr", ""),
+        )
+
+    # ── Mod Validation & Compatibility ──
+    elif name == "validate_mod":
+        return analyzer.validate_mod(args["project_dir"])
+
+    elif name == "diff_game_versions":
+        return analyzer.diff_game_versions(
+            old_decompiled_dir=args["old_decompiled_dir"],
+            new_decompiled_dir=args["new_decompiled_dir"],
+        )
+
+    elif name == "check_mod_compatibility":
+        return analyzer.check_mod_compatibility(args["project_dir"])
+
+    elif name == "list_game_vfx":
+        return analyzer.list_game_vfx(query=args.get("query", ""))
+
+    # ── Extended Bridge ──
+    elif name == "bridge_use_potion":
+        from . import bridge_client
+        return await _call_bridge(
+            bridge_client.use_potion,
+            potion_index=args["potion_index"],
+            target_index=args.get("target_index", -1),
+        )
+
+    elif name == "bridge_make_event_choice":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.make_event_choice, args["choice_index"])
+
+    elif name == "bridge_navigate_map":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.navigate_map, row=args["row"], col=args["col"])
+
+    elif name == "bridge_rest_site_choice":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.rest_site_choice, args["choice"])
+
+    elif name == "bridge_shop_action":
+        from . import bridge_client
+        return await _call_bridge(
+            bridge_client.shop_action,
+            action=args["action"],
+            index=args.get("index", 0),
+        )
+
+    elif name == "bridge_get_card_piles":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.get_card_piles)
+
+    elif name == "bridge_manipulate_state":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.manipulate_state, args)
+
+    # ── Live Coding & Iteration ──
+    elif name == "bridge_hot_swap_patches":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.hot_swap_patches, args["dll_path"])
+
+    elif name == "bridge_set_game_speed":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.set_game_speed, args.get("speed", 1.0))
+
+    elif name == "bridge_restart_run":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.restart_run)
+
+    elif name == "bridge_get_state_diff":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.get_state_diff)
+
+    elif name == "bridge_get_exceptions":
+        from . import bridge_client
+        return await _call_bridge(
+            bridge_client.get_exceptions,
+            max_count=args.get("max_count", 20),
+            since_id=args.get("since_id", 0),
+        )
+
+    elif name == "bridge_get_events":
+        from . import bridge_client
+        return await _call_bridge(
+            bridge_client.get_events,
+            since_id=args.get("since_id", 0),
+            max_count=args.get("max_count", 100),
+        )
+
+    elif name == "bridge_capture_screenshot":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.capture_screenshot, args.get("save_path", ""))
+
+    elif name == "bridge_save_snapshot":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.save_snapshot, args.get("name", "default"))
+
+    elif name == "bridge_restore_snapshot":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.restore_snapshot, args.get("name", "default"))
+
+    # ── Breakpoints & Stepping ──
+    elif name == "bridge_debug_pause":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.debug_pause)
+
+    elif name == "bridge_debug_resume":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.debug_resume)
+
+    elif name == "bridge_debug_step":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.debug_step, args.get("mode", "action"))
+
+    elif name == "bridge_debug_set_breakpoint":
+        from . import bridge_client
+        return await _call_bridge(
+            bridge_client.debug_set_breakpoint,
+            bp_type=args.get("type", "action"),
+            target=args.get("target", ""),
+            condition=args.get("condition"),
+        )
+
+    elif name == "bridge_debug_remove_breakpoint":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.debug_remove_breakpoint, args["id"])
+
+    elif name == "bridge_debug_list_breakpoints":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.debug_list_breakpoints)
+
+    elif name == "bridge_debug_clear_breakpoints":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.debug_clear_breakpoints)
+
+    elif name == "bridge_debug_get_context":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.debug_get_context)
+
+    # ── Debugging & Logging ──
+    elif name == "bridge_get_game_log":
+        from . import bridge_client
+        return await _call_bridge(
+            bridge_client.get_game_log,
+            max_count=args.get("max_count", 100),
+            since_id=args.get("since_id", 0),
+            level=args.get("level"),
+            contains=args.get("contains"),
+        )
+
+    elif name == "bridge_set_log_level":
+        from . import bridge_client
+        return await _call_bridge(
+            bridge_client.set_log_level,
+            log_type=args.get("type"),
+            level=args.get("level"),
+            global_level=args.get("global_level"),
+            capture_level=args.get("capture_level"),
+        )
+
+    elif name == "bridge_get_log_levels":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.get_log_levels)
+
+    elif name == "bridge_get_diagnostics":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.get_diagnostics, args.get("log_lines", 40))
+
+    elif name == "bridge_clear_exceptions":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.clear_exceptions)
+
+    elif name == "bridge_clear_events":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.clear_events)
+
+    # ── AutoSlay ──
+    elif name == "bridge_autoslay_start":
+        from . import bridge_client
+        return await _call_bridge(
+            bridge_client.autoslay_start,
+            character=args.get("character", "Ironclad"),
+            seed=args.get("seed"),
+            runs=args.get("runs", 1),
+            loop=args.get("loop", False),
+        )
+
+    elif name == "bridge_autoslay_stop":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.autoslay_stop)
+
+    elif name == "bridge_autoslay_status":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.autoslay_status)
+
+    elif name == "bridge_autoslay_configure":
+        from . import bridge_client
+        return await _call_bridge(
+            bridge_client.autoslay_configure,
+            run_timeout_seconds=args.get("run_timeout_seconds"),
+            room_timeout_seconds=args.get("room_timeout_seconds"),
+            screen_timeout_seconds=args.get("screen_timeout_seconds"),
+            polling_interval_ms=args.get("polling_interval_ms"),
+            watchdog_timeout_seconds=args.get("watchdog_timeout_seconds"),
+            max_floor=args.get("max_floor"),
+        )
+
+    # ── Test Runner ──
+    elif name == "run_test_scenario":
+        from .test_runner import run_test_scenario
+        return run_test_scenario(args["scenario"])
+
+    # ── File Watcher ──
+    elif name == "watch_project":
+        from .file_watcher import start_watching
+        return start_watching(
+            project_dir=args["project_dir"],
+            mods_dir=args["mods_dir"],
+            mod_name=args.get("mod_name", ""),
+            configuration=args.get("configuration", "Debug"),
+        )
+
+    elif name == "stop_watching":
+        from .file_watcher import stop_watching
+        return stop_watching()
+
+    elif name == "watcher_status":
+        from .file_watcher import watcher_status
+        return watcher_status()
+
+    # ── Analysis ──
+    elif name == "reverse_hook_lookup":
+        return analyzer.reverse_hook_lookup(args["entity_name"])
+
+    # ── Project Workflow ──
+    elif name == "package_mod":
+        from .project_workflow import package_mod
+        return package_mod(
+            project_dir=args["project_dir"],
+            output_path=args.get("output_path", ""),
+        )
+
+    elif name == "check_dependencies":
+        from .project_workflow import check_dependencies
+        return check_dependencies(args["project_dir"])
+
+    elif name == "discover_mod_projects":
+        from .project_workflow import discover_mod_projects
+        return discover_mod_projects(args["workspace_dir"])
+
+    # ── Advanced Generators ──
+    elif name == "generate_net_message":
+        return mod_gen.generate_net_message(
+            mod_namespace=args["mod_namespace"],
+            class_name=args["class_name"],
+            transfer_mode=args.get("transfer_mode", "Reliable"),
+            should_broadcast=args.get("should_broadcast", True),
+            fields=args.get("fields"),
+        )
+
+    elif name == "generate_godot_ui":
+        return mod_gen.generate_godot_ui(
+            mod_namespace=args["mod_namespace"],
+            class_name=args["class_name"],
+            title=args.get("title", "My Panel"),
+            base_type=args.get("base_type", "Control"),
+            controls=args.get("controls"),
+            show_in_process=args.get("show_in_process", False),
+        )
+
+    elif name == "generate_settings_panel":
+        return mod_gen.generate_settings_panel(
+            mod_namespace=args["mod_namespace"],
+            class_name=args.get("class_name", "ModSettings"),
+            mod_id=args["mod_id"],
+            properties=args.get("properties"),
+        )
+
+    elif name == "generate_hover_tip":
+        return mod_gen.generate_hover_tip(
+            mod_namespace=args["mod_namespace"],
+            class_name=args.get("class_name", "ModHoverTips"),
+        )
+
+    elif name == "generate_overlay":
+        return mod_gen.generate_overlay(
+            mod_namespace=args["mod_namespace"],
+            class_name=args["class_name"],
+            mod_id=args.get("mod_id", "mymod"),
+            overlay_description=args.get("overlay_description", "Custom overlay"),
+            inject_target=args.get("inject_target", "NCombatRoom"),
+        )
+
+    elif name == "generate_transpiler_patch":
+        return mod_gen.generate_transpiler_patch(
+            mod_namespace=args["mod_namespace"],
+            class_name=args["class_name"],
+            target_type=args["target_type"],
+            target_method=args["target_method"],
+            description=args.get("description", ""),
+            search_opcode=args.get("search_opcode", "Callvirt"),
+            search_method=args.get("search_method", ""),
+            mod_id=args.get("mod_id", "mymod"),
+        )
+
+    elif name == "generate_reflection_accessor":
+        return mod_gen.generate_reflection_accessor(
+            mod_namespace=args["mod_namespace"],
+            class_name=args["class_name"],
+            target_type=args["target_type"],
+            fields=args.get("fields"),
+        )
+
+    elif name == "generate_custom_keyword":
+        return mod_gen.generate_custom_keyword(
+            mod_namespace=args["mod_namespace"],
+            keyword_name=args["keyword_name"],
+        )
+
+    elif name == "generate_custom_pile":
+        return mod_gen.generate_custom_pile(
+            mod_namespace=args["mod_namespace"],
+            pile_name=args["pile_name"],
+        )
+
+    elif name == "generate_spire_field":
+        return mod_gen.generate_spire_field(
+            mod_namespace=args["mod_namespace"],
+            class_name=args["class_name"],
+            target_type=args["target_type"],
+            field_name=args.get("field_name", "Value"),
+            field_type=args.get("field_type", "int"),
+            default_value=args.get("default_value", "0"),
+        )
+
+    elif name == "generate_dynamic_var":
+        return mod_gen.generate_dynamic_var(
+            mod_namespace=args["mod_namespace"],
+            class_name=args["class_name"],
+            var_name=args["var_name"],
+            default_value=args.get("default_value", 0),
+        )
+
+    # ── Image Generation & Processing ──
+    elif name == "generate_art":
+        return await image_gen.generate_and_process(
+            description=args["description"],
+            asset_type=args["asset_type"],
+            name=args["name"],
+            project_dir=args["project_dir"],
+            model=args.get("model"),
+        )
+
+    elif name == "process_art":
+        return await image_gen.process_existing_image(
+            image_path=args["image_path"],
+            asset_type=args["asset_type"],
+            name=args["name"],
+            project_dir=args["project_dir"],
+        )
+
+    elif name == "list_art_profiles":
+        profiles = {}
+        for atype, profile in image_gen.PROFILES.items():
+            profiles[atype] = {
+                "background": profile.get("bg", "per-variant"),
+                "generation_size": image_gen.GEN_SIZES.get(atype, (512, 512)),
+                "variants": [
+                    {
+                        "path": v["rel_path"],
+                        "size": v["size"],
+                        "background": v.get("bg", profile.get("bg", "opaque")),
+                        "effect": v.get("effect"),
+                    }
+                    for v in profile.get("variants", [])
+                ],
+            }
+        return profiles
 
     else:
         return f"Unknown tool: {name}"
@@ -1072,952 +3365,24 @@ async def _handle_tool(name: str, args: dict):
 # ─── Guides ──────────────────────────────────────────────────────────────────
 
 def _get_guide(topic: str) -> str:
-    guides = {
-        "getting_started": """\
-# Getting Started with STS2 Modding
+    guides_dir = Path(__file__).parent / "docs" / "guides"
+    guide_file = guides_dir / f"{topic}.md"
+    if guide_file.exists():
+        return guide_file.read_text(encoding="utf-8")
+    available = [f.stem for f in guides_dir.glob("*.md")]
+    return f"Unknown topic: {topic}. Available: {', '.join(sorted(available))}"
 
-## Prerequisites
-- .NET SDK 9.0+
-- Godot 4.5.1 (for PCK export only)
-- The game: Slay the Spire 2
-
-## Quick Start
-1. Use `create_mod_project` to scaffold a new mod
-2. Add content using `generate_card`, `generate_relic`, etc.
-3. Build with `build_mod`
-4. Install with `install_mod`
-5. Test in-game with the developer console (backtick key)
-
-## Key Concepts
-- **sts2.dll**: The game's compiled C# code at `data_sts2_windows_x86_64/sts2.dll`
-- **ModInitializer**: Attribute marking your mod's entry point class
-- **Harmony**: Runtime method patching library for hooking into game code
-- **Hooks**: The game's built-in event system (80+ hooks for combat, cards, etc.)
-- **ModelDb**: Central registry for all game entities (auto-discovers via reflection)
-- **Pools**: Collections that determine where entities appear (card pools, relic pools, etc.)
-
-## Mod Structure
-```
-MyMod/
-├── MyMod.csproj           # .NET project file referencing sts2.dll
-├── mod_manifest.json      # Mod metadata (id, name, author, version)
-├── Code/
-│   ├── ModEntry.cs        # [ModInitializer] entry point
-│   ├── Cards/             # Custom card classes
-│   ├── Relics/            # Custom relic classes
-│   ├── Powers/            # Custom power classes
-│   ├── Potions/           # Custom potion classes
-│   ├── Monsters/          # Custom monster classes
-│   ├── Encounters/        # Custom encounter classes
-│   └── Patches/           # Harmony patches
-├── MyMod/
-│   ├── localization/eng/  # Localization JSON files
-│   ├── images/            # Entity images (256x256 for relics/powers)
-│   └── MonsterResources/  # Monster scenes and sprites
-└── mod_image.png          # Mod icon for the mod list
-```
-
-## Enabling the Console
-A loaded mod automatically enables the full console. Press backtick (`) in-game.
-Or manually: edit settings.save, add `"full_console": true` after `fps_limit`.
-""",
-        "cards": """\
-# Creating Custom Cards
-
-## Base Class: CardModel
-Cards extend `CardModel` and override key properties:
-- `Type`: CardType.Attack/Skill/Power/Status/Curse
-- `Rarity`: CardRarity.Basic/Common/Uncommon/Rare
-- `TargetType`: AnyEnemy/AllEnemies/RandomEnemy/None/Self/AnyAlly/AllAllies
-- `EnergyCost`: Integer energy cost
-- `Keywords`: HashSet<CardKeyword> (Exhaust, Ethereal, Innate, Retain, Sly, Eternal)
-
-## Pool Registration
-Use `[Pool(typeof(PoolClass))]` attribute:
-- `IroncladCardPool`, `SilentCardPool`, `RegentCardPool`, `NecrobinderCardPool`, `DefectCardPool`
-- `ColorlessCardPool` (shared)
-
-## Dynamic Variables
-Override `CanonicalVars` to provide numeric values:
-- `DamageVar(amount)` - Attack damage
-- `BlockVar(amount)` - Block amount
-- `MagicNumberVar(amount)` - Generic number
-- `PowerVar<TPower>(amount)` - Power stack amount
-
-Access in OnPlay: `DynamicVars.Damage.BaseValue`, `DynamicVars.Block.BaseValue`
-
-## Key Methods
-- `OnPlay(PlayerChoiceContext, CardPlay)` - Main effect
-- `OnUpgrade()` - Upgrade modifications
-- `CanPlay()` - Playability check
-- `IsValidTarget(Creature)` - Target validation
-
-## Commands Pattern
-- `DamageCmd.Attack(amount).FromCard(this, cardPlay).Execute(choiceContext)`
-- `CreatureCmd.GainBlock(creature, amount, ValueProp.Powered, this)`
-- `PowerCmd.Apply<TPower>(target, amount, source, card)`
-- `CardPileCmd.Draw(player, count, choiceContext)`
-- `CardPileCmd.Add(card, pileType)`
-
-## Localization (cards.json)
-```json
-{
-  "MY_CARD.title": "Card Name",
-  "MY_CARD.description": "Deal [blue]{Damage}[/blue] damage.",
-  "MY_CARD.upgrade.description": "Deal [blue]{Damage}[/blue] damage."
-}
-```
-
-## Console Test: `card MY_CARD`
-""",
-        "relics": """\
-# Creating Custom Relics
-
-## Base Class: RelicModel
-Override key properties:
-- `Rarity`: RelicRarity.Starter/Common/Uncommon/Rare/Shop/Event/Ancient
-- `IsStackable`: Whether multiple instances can exist (rare)
-
-## Pool Registration
-`[Pool(typeof(SharedRelicPool))]` or character-specific pools.
-
-## Common Hook Methods to Override
-- `BeforeCombatStart()` - Trigger at combat start
-- `AfterCardPlayed(CombatState, PlayerChoiceContext, CardPlay)` - After any card played
-- `AfterDamageReceived(PlayerChoiceContext, Creature, DamageResult, ValueProp, Creature?, CardModel?)` - After taking damage
-- `AfterTurnEnd(CombatState, CombatSide)` - End of turn
-- `ModifyDamageAdditive(...)` - Modify damage dealt
-- `ModifyBlock(...)` - Modify block gained
-- `AfterBlockGained(...)` - After gaining block
-- `BeforeHandDraw(...)` - Before drawing cards
-
-## Key Patterns
-- `Flash()` - Play relic activation animation
-- `Owner` - The Player who has this relic
-- Use state fields (e.g., `_usedThisCombat`) and reset in `AfterCombatEnd`
-
-## Images: 256x256 PNG with 10px black outline (60% opacity)
-Place at: `{ModName}/images/relics/{snake_name}.png`
-
-## Localization (relics.json)
-```json
-{
-  "MY_RELIC.title": "Relic Name",
-  "MY_RELIC.description": "Effect description with [blue]{Value}[/blue].",
-  "MY_RELIC.flavor": "Flavor text..."
-}
-```
-
-## Console Test: `relic add MY_RELIC`
-""",
-        "powers": """\
-# Creating Custom Powers (Buffs/Debuffs)
-
-## Base Class: PowerModel
-Override key properties:
-- `Type`: PowerType.Buff or PowerType.Debuff
-- `StackType`: PowerStackType.Counter (stackable) or PowerStackType.Single
-
-## Key Properties
-- `Amount` - Current stack count
-- `Owner` - Creature with this power
-- `Applier` - Creature that applied it
-
-## Common Hook Methods
-- `ModifyDamageAdditive(...)` - Add flat damage (like Strength)
-- `ModifyDamageMultiplicative(...)` - Multiply damage (like Vulnerable: 1.5x)
-- `BeforeHandDraw(Player, PlayerChoiceContext, CombatState)` - Before draw step
-- `AfterTurnEnd(CombatState, CombatSide)` - End of turn (tick down with `PowerCmd.Decrement(this)`)
-- `AfterCardPlayed(...)` - React to cards
-- `BeforeDamageReceived(...)` - Before taking damage
-
-## Images: 256x256 PNG with 10px black outline (60% opacity)
-
-## Localization (powers.json)
-```json
-{
-  "MY_POWER.title": "Power Name",
-  "MY_POWER.smartDescription": "Effect with [blue]{Amount}[/blue] stacks and {Amount:plural:time|times}.",
-  "MY_POWER.description": "Base description for 1 stack."
-}
-```
-
-## Console Test: `power MY_POWER 3 0` (3 stacks on player index 0)
-""",
-        "potions": """\
-# Creating Custom Potions
-
-## Base Class: PotionModel
-Override key properties:
-- `Rarity`: PotionRarity.Common/Uncommon/Rare
-- `Usage`: PotionUsage.CombatOnly/OutOfCombat/Anywhere
-- `TargetType`: None/AnyEnemy/AnyAlly/AnyPlayer/AllEnemies/AllAllies
-
-## Pool Registration
-`[Pool(typeof(SharedPotionPool))]` or character-specific pools.
-
-## Key Methods
-- `OnUse(PlayerChoiceContext, Creature?)` - Main effect
-
-## Localization (potions.json)
-```json
-{
-  "MY_POTION.title": "Potion Name",
-  "MY_POTION.description": "Effect description."
-}
-```
-
-## Console Test: `potion MY_POTION`
-""",
-        "monsters": """\
-# Creating Custom Monsters
-
-## Base Class: MonsterModel
-Override key properties:
-- `MinInitialHp` / `MaxInitialHp` - HP range (random each combat)
-- `VisualsPath` - Path to .tscn scene file
-
-## Move State Machine
-Override `GenerateMoveStateMachine()`:
-```csharp
-var strike = new MoveState("STRIKE", Strike, new SingleAttackIntent(10));
-var defend = new MoveState("DEFEND", Defend, new DefendIntent());
-strike.FollowUpState = defend;
-defend.FollowUpState = strike;
-return new MonsterMoveStateMachine(new List<MonsterState> { strike, defend }, strike);
-```
-
-## Intent Types
-- `SingleAttackIntent(damage)` - Single attack
-- `MultiAttackIntent(damage, count)` - Multi-hit
-- `DefendIntent()` - Gaining block
-- `BuffIntent()` - Applying buff
-- `DebuffIntent()` - Applying debuff
-- `new AbstractIntent[] { ... }` - Multiple intents per turn
-
-## Randomized Starting Move
-Use `RandomBranchState` with `AddBranch(state, MoveRepeatType.CannotRepeat)`
-
-## Scene File (.tscn)
-Required nodes: Visuals (Sprite2D), Bounds (Control), CenterPos (Marker2D), IntentPos (Marker2D).
-Use `generate_monster` to auto-generate the scene.
-
-## IMPORTANT: CreateVisualsPatch
-Custom static-image monsters NEED a Harmony patch on `MonsterModel.CreateVisuals`.
-Use `generate_monster` which includes instructions, or see the advanced modding guide.
-
-## Ascension Scaling
-`AscensionHelper.GetValueIfAscension(AscensionLevel.ToughEnemies, scaledValue, baseValue)`
-
-## Console Test: `fight ENCOUNTER_NAME`
-""",
-        "encounters": """\
-# Creating Custom Encounters
-
-## Base Class: EncounterModel
-Override:
-- `RoomType`: Monster/Elite/Boss
-- `AllPossibleMonsters`: Yield all monster types
-- `GenerateMonsters()`: Return list of (MonsterModel, slotName?) tuples
-
-## Adding to an Act
-Harmony patch the act's `GenerateAllEncounters`:
-```csharp
-[HarmonyPatch(typeof(Underdocks), nameof(Underdocks.GenerateAllEncounters))]
-public static class MyPatch {
-    public static void Postfix(ref IEnumerable<EncounterModel> __result) {
-        var list = __result.ToList();
-        list.Add(ModelDb.Encounter<MyEncounter>());
-        __result = list;
-    }
-}
-```
-
-## Acts: Underdocks (Act 1), Metropolis (Act 2), Glory (Act 3), TheHeart (Act 4)
-
-## Encounter Scenes
-For multi-monster encounters with specific positions, use `HasScene = true`
-and create a .tscn with Marker2D nodes for slot positions.
-""",
-        "events": """\
-# Creating Custom Events
-
-## Base Class: EventModel
-Events are choice-based narrative encounters. Override:
-- `IsShared` - All players see same event
-- `IsDeterministic` - Seed-affected
-- `LayoutType` - Default/Combat/Ancient/Custom
-- `GenerateInitialOptions()` - Create initial choices
-
-## Key Methods
-- `BeginEvent(Player, bool)` - Start event
-- `SetEventState(LocString, IEnumerable<EventOption>)` - Update display
-- `SetEventFinished(LocString)` - End event
-- `EnterCombatWithoutExitingEvent()` - Trigger combat within event
-
-## EventOption
-Each choice has:
-- Text (LocString)
-- A callback method
-- Optional conditions
-
-## See existing events via: `list_entities` with `entity_type=event`
-""",
-        "harmony_patches": """\
-# Harmony Patches
-
-## Overview
-Harmony patches let you modify game methods at runtime without changing game files.
-The game ships with Harmony 2.4.2 (`0Harmony.dll`).
-
-## Patch Types
-- **Prefix**: Runs BEFORE original method. Return `false` to skip original.
-- **Postfix**: Runs AFTER original method. Can modify `__result`.
-- **Transpiler**: Modify IL code directly (advanced).
-
-## Syntax
-```csharp
-[HarmonyPatch(typeof(TargetClass), nameof(TargetClass.TargetMethod))]
-public static class MyPatch
-{
-    // Prefix - can prevent original from running
-    public static bool Prefix(TargetClass __instance, ref ReturnType __result) { ... }
-
-    // Postfix - runs after, can modify result
-    public static void Postfix(TargetClass __instance, ref ReturnType __result) { ... }
-}
-```
-
-## Special Parameters
-- `__instance` - The object the method is called on
-- `__result` - Return value (ref in postfix to modify)
-- `__state` - Pass data from prefix to postfix
-- Parameter names matching original method parameters
-
-## Accessing Private Fields
-- `Traverse.Create(__instance).Field("_fieldName").GetValue<Type>()`
-- `AccessTools.FieldRefAccess<Type, FieldType>("fieldName")`
-
-## Manual Patching
-```csharp
-var harmony = new Harmony("my.mod.id");
-harmony.PatchAll(); // Auto-discover all [HarmonyPatch] classes
-// or manually:
-harmony.Patch(originalMethod, new HarmonyMethod(prefixMethod));
-```
-
-## Common Targets
-- `CardModel.PortraitPath` (getter) - Replace card images
-- `MonsterModel.CreateVisuals` - Custom monster visuals
-- `CombatManager.SetReadyToEndTurn` - End turn events
-- `NGame._Input` - Custom keybindings
-- `NGame.LaunchMainMenu` - Skip splash screen
-- Act `.GenerateAllEncounters` - Add encounters
-""",
-        "localization": """\
-# Localization System
-
-## File Structure
-Place JSON files in: `{ModName}/localization/eng/`
-- `cards.json` - Card text
-- `relics.json` - Relic text
-- `powers.json` - Power text
-- `potions.json` - Potion text
-- `monsters.json` - Monster names
-- `encounters.json` - Encounter text
-
-## Key Format
-Keys use SCREAMING_SNAKE_CASE model IDs:
-`MY_CARD.title`, `MY_CARD.description`, `MY_CARD.upgrade.description`
-
-## Rich Text Tags
-- `[gold]keyword name[/gold]` - Gold color for game keywords
-- `[blue]{Value}[/blue]` - Blue for dynamic numbers
-- Other colors: `[red]`, `[green]`, `[gray]`
-
-## SmartFormat Variables
-- `{Damage}` - Card damage value
-- `{Block}` - Block value
-- `{Amount}` - Power stack count
-- `{StrengthPower}` - Power amount reference
-- `{Amount:plural:card|cards}` - Pluralization
-- `{count:conditional:text_if_true|text_if_false}` - Conditionals
-
-## Languages
-eng, zhs, deu, esp, fra, ita, jpn, kor, pol, ptb, rus, spa, tha, tur
-""",
-        "console": """\
-# Developer Console
-
-## Enabling
-- Any loaded mod enables the full console automatically
-- Manual: edit settings.save, add `"full_console": true`
-- Open with backtick (`) key
-
-## Key Commands
-- `help [cmd]` - List commands or get help for specific command
-- `card <id>` - Add card to hand/deck
-- `relic add <id>` / `relic remove <id>` - Manage relics
-- `potion <id>` - Add potion
-- `fight <id>` - Start encounter
-- `event <id>` - Start event
-- `gold <amount>` - Add gold
-- `heal <amount>` - Heal player
-- `block <amount>` - Add block
-- `energy` - Add energy
-- `draw <count>` - Draw cards
-- `discard <count>` - Discard cards
-- `power <id> <amount> <player_index>` - Apply power
-- `godmode` - Invincibility
-- `win` - Win current combat
-- `kill` - Kill enemies
-- `unlock all` - Unlock all content
-- `travel <node>` - Travel to map node
-- `room <type>` - Enter room type
-- `log <type> <level>` - Set log level
-- `open saves` - Open saves directory
-""",
-        "hooks": """\
-# Game Hook System
-
-## Overview
-Hooks are the primary way content (cards, relics, powers) interacts with game events.
-All hooks are defined in `Hook.cs` and called on all `AbstractModel` instances in combat.
-
-## Hook Categories
-
-### Before Hooks (pre-event, can prepare)
-BeforeCombatStart, BeforeCardPlayed, BeforeTurnEnd, BeforeHandDraw,
-BeforeDamageReceived, BeforeBlockGained, BeforePowerAmountChanged,
-BeforeCardRemoved, BeforeRoomEntered, BeforeRewardsOffered, BeforePotionUsed,
-BeforeFlush, BeforePlayPhaseStart, BeforeCardAutoPlayed, BeforeDeath
-
-### After Hooks (post-event, react)
-AfterCombatEnd, AfterCombatVictory, AfterCardPlayed, AfterCardDrawn,
-AfterCardDiscarded, AfterCardExhausted, AfterCardRetained,
-AfterDamageReceived, AfterDamageGiven, AfterBlockGained, AfterBlockBroken,
-AfterPowerAmountChanged, AfterTurnEnd, AfterEnergyReset, AfterHandEmptied,
-AfterShuffle, AfterRoomEntered, AfterRewardTaken, AfterItemPurchased,
-AfterPotionUsed, AfterRestSiteHeal, AfterRestSiteSmith, AfterGoldGained,
-AfterDeath, AfterCreatureAddedToCombat, AfterOrbChanneled, AfterOrbEvoked
-
-### Modify Hooks (change values, return modified value)
-ModifyDamage, ModifyBlock, ModifyHandDraw, ModifyMaxEnergy,
-ModifyEnergyCostInCombat, ModifyCardRewardOptions, ModifyMerchantPrice,
-ModifyPowerAmountGiven, ModifyPowerAmountReceived, ModifyHealAmount,
-ModifyRestSiteHealAmount, ModifyRewards, ModifyGeneratedMap, ModifyXValue,
-ModifyAttackHitCount, ModifyCardPlayCount, ModifyStarCost, ModifyOrbValue
-
-### Should Hooks (boolean gates, return true/false)
-ShouldDie, ShouldDraw, ShouldPlay, ShouldFlush, ShouldClearBlock,
-ShouldGainGold, ShouldGainStars, ShouldAfflict, ShouldEtherealTrigger,
-ShouldAllowHitting, ShouldAllowTargeting, ShouldTakeExtraTurn,
-ShouldProcurePotion, ShouldStopCombatFromEnding
-
-## Use `list_hooks` tool for complete list with full signatures.
-""",
-        "pools": """\
-# Pool System
-
-## Overview
-Pools determine which entities appear for which characters. Add to pools with `[Pool]` attribute.
-
-## Card Pools
-- `IroncladCardPool` - Ironclad character
-- `SilentCardPool` - Silent character
-- `RegentCardPool` - Regent character
-- `NecrobinderCardPool` - Necrobinder character
-- `DefectCardPool` - Defect character
-- `ColorlessCardPool` - Available to all characters
-
-## Relic Pools
-- `SharedRelicPool` - Available to all characters
-- `IroncladRelicPool`, `SilentRelicPool`, etc. - Character-specific
-- `EventRelicPool` - From events only
-- `FallbackRelicPool` - Fallback options
-
-## Potion Pools
-- `SharedPotionPool` - Available to all
-- Character-specific potion pools
-
-## Mod Registration
-Use `[Pool(typeof(PoolName))]` on your entity class.
-Alternatively, use `ModHelper.AddModelToPool<PoolType, ModelType>()` in your mod initializer
-(must be called BEFORE pools are frozen during game init).
-""",
-        "building": """\
-# Building & Deploying Mods
-
-## Build Process
-1. `dotnet build YourMod.csproj -c Debug`
-2. Output DLL at `.godot/mono/temp/bin/Debug/YourMod.dll` (or `bin/Debug/`)
-
-## PCK Export (for resources)
-1. Open Godot 4.5.1
-2. Create export template
-3. Resources tab → "Export selected resources (and dependencies)"
-4. Select mod_image.png, mod_manifest.json, localization files, monster scenes
-5. Export as .pck
-
-## Installation
-Copy to game's `mods/` folder:
-```
-mods/
-└── yourmod/
-    ├── yourmod.dll         # Compiled mod assembly
-    ├── yourmod.pck         # Resource pack (optional)
-    ├── mod_manifest.json   # Required metadata
-    └── mod_image.png       # Optional mod icon
-```
-
-## mod_manifest.json
-```json
-{
-  "id": "yourmod",
-  "pck_name": "YourMod",
-  "name": "Your Mod",
-  "author": "You",
-  "description": "What it does",
-  "version": "1.0.0",
-  "has_pck": true,
-  "has_dll": true,
-  "affects_gameplay": true,
-  "dependencies": []
-}
-```
-""",
-        "debugging": """\
-# Debugging Mods
-
-## Remote Debugging (Godot Output)
-1. In Steam, add launch parameter: `--remote-debug tcp://127.0.0.1:6007`
-2. Open Godot editor (port 6007 is default for debug server)
-3. Check "Keep Debug Server Open" under Debug tab
-4. Launch STS2 through Steam
-5. Godot's Output panel shows all game logs
-
-## In-Game Console
-Press backtick (`) to open. Key debug commands:
-- `log Generic DEBUG` - Enable debug logging
-- `godmode` - Invincibility for testing
-- `fight ENCOUNTER_ID` - Jump to specific encounter
-- `card CARD_ID` - Add specific card
-- `gold 999` - Get gold
-
-## Logging in Code
-```csharp
-using MegaCrit.Sts2.Core.Logging;
-Log.Info("message");    // Standard info
-Log.Warn("message");    // Warning (yellow)
-Log.Error("message");   // Error (red)
-```
-
-## File Logging
-Write to: `UserDataPathProvider.GetAccountScopedBasePath("mymod_log.txt")`
-
-## Common Issues
-- Mod not showing: Check mod_manifest.json format and mod folder structure
-- Assembly load failure: Ensure .NET 9.0 target, check DLL dependencies
-- Null reference: Models must be accessed after initialization; check hook timing
-- PCK not loading: Verify pck_name in manifest matches actual .pck filename
-""",
-        "project_structure": """\
-# Project Structure Reference
-
-## Recommended Layout
-```
-MyMod/
-├── MyMod.csproj                    # .NET 9.0 project
-├── mod_manifest.json               # Mod metadata
-├── mod_image.png                   # Mod icon (optional)
-├── Code/
-│   ├── ModEntry.cs                 # [ModInitializer] entry point
-│   ├── Cards/
-│   │   └── MyCard.cs
-│   ├── Relics/
-│   │   └── MyRelic.cs
-│   ├── Powers/
-│   │   └── MyPower.cs
-│   ├── Potions/
-│   │   └── MyPotion.cs
-│   ├── Monsters/
-│   │   └── MyMonster.cs
-│   ├── Encounters/
-│   │   └── MyEncounter.cs
-│   └── Patches/
-│       ├── CreateVisualsPatch.cs   # Required for custom monsters
-│       └── MyPatches.cs
-└── MyMod/                          # Resource folder (matches pck_name)
-    ├── localization/
-    │   └── eng/
-    │       ├── cards.json
-    │       ├── relics.json
-    │       ├── powers.json
-    │       ├── potions.json
-    │       ├── monsters.json
-    │       └── encounters.json
-    ├── images/
-    │   ├── relics/                 # 256x256 with outline
-    │   ├── powers/                 # 256x256 with outline
-    │   ├── cards/                  # 1000x760 (606x852 for Ancient)
-    │   └── potions/
-    └── MonsterResources/
-        └── MyMonster/
-            ├── my_monster.tscn     # Godot scene
-            └── my_monster.png      # Sprite
-```
-
-## .csproj Key Settings
-- TargetFramework: net9.0
-- GodotSharp 4.4.0
-- Lib.Harmony 2.4.2
-- Reference to sts2.dll (Private=false)
-""",
-    }
-    return guides.get(topic, f"Unknown topic: {topic}. Available: {', '.join(guides.keys())}")
 
 
 # ─── Utility Functions ───────────────────────────────────────────────────────
 
 def _get_baselib_reference(topic: str) -> str:
-    refs = {
-        "overview": """\
-# BaseLib (Alchyr.Sts2.BaseLib) - Community Modding Library
-
-**Source:** E:\\Github\\BaseLib-StS2 | **NuGet:** Alchyr.Sts2.BaseLib | **Version:** 0.1.6
-
-## What it provides
-- **Abstract base classes**: CustomCardModel, CustomRelicModel, CustomPowerModel, CustomPotionModel, CustomCharacterModel, CustomAncientModel
-- **Pool models**: CustomCardPoolModel, CustomRelicPoolModel, CustomPotionPoolModel (with custom frames, energy icons)
-- **Config system**: SimpleModConfig with auto-generated in-game UI (toggles, sliders, dropdowns)
-- **Card variables**: ExhaustiveVar, PersistVar, RefundVar
-- **CommonActions**: Helper methods for damage, block, draw, apply powers, card selection
-- **Utilities**: SpireField (attach data to objects), WeightedList, GeneratedNodePool, ShaderUtils
-- **IL Patching**: InstructionMatcher/InstructionPatcher for advanced Harmony transpilers
-- **Mod Interop**: Soft-depend on other mods without hard references
-
-## Key Benefits over raw game API
-1. **Auto-registration** - ICustomModel types get prefixed IDs and registered automatically
-2. **Custom content support** - Proper image/icon loading for powers, cards, relics
-3. **Config persistence** - JSON config with auto-UI, no manual UI code needed
-4. **Character creation** - Full pipeline for new playable characters with pools
-5. **Convenience methods** - CommonActions reduces boilerplate for damage/block/draw
-
-## Add to .csproj
-```xml
-<PackageReference Include="Alchyr.Sts2.BaseLib" Version="0.1.*" />
-```
-""",
-        "custom_card": """\
-# BaseLib: CustomCardModel
-
-Extends `CardModel` with:
-- `GainsBlock` auto-detected from BlockVar in CanonicalVars
-- Custom frame support via pool's FramePath/FrameMaterial
-- Auto-registration in CustomContentDictionary
-- ICustomModel prefix applied automatically
-
-Usage: Same as CardModel but extend `CustomCardModel` instead.
-Your card pool should extend `CustomCardPoolModel` for custom frames.
-""",
-        "custom_relic": """\
-# BaseLib: CustomRelicModel
-
-Extends `RelicModel` with:
-- Auto-add to content dictionary
-- ICustomModel prefix for IDs
-- Works with CustomRelicPoolModel for pool-specific features
-
-Usage: Same as RelicModel but extend `CustomRelicModel` instead.
-""",
-        "custom_power": """\
-# BaseLib: CustomPowerModel + ICustomPower
-
-Extends `PowerModel` with:
-- ICustomModel marker for ID prefixing
-- Implement `ICustomPower` interface for custom icons:
-  ```csharp
-  public string PackedIcon => "res://MyMod/images/powers/my_power_packed.png";  // 64x64
-  public string BigIcon => "res://MyMod/images/powers/my_power.png";            // 256x256
-  public string? BigBetaIcon => null;                                           // optional
-  ```
-""",
-        "custom_potion": """\
-# BaseLib: CustomPotionModel
-
-Extends `PotionModel` with:
-- `AutoAdd` property (default true) for automatic pool registration
-- ICustomModel prefix applied automatically
-""",
-        "custom_character": """\
-# BaseLib: CustomCharacterModel
-
-Full pipeline for creating new playable characters. Override:
-
-**Visual Assets:**
-- `VisualsPath` - Character .tscn scene
-- `SelectScreenBgPath` - Character select background
-- `EnergyCounterPath` - Energy counter .tscn
-- Trail settings, icon paths
-
-**Animation:**
-- `SetupAnimator()` - Custom animation configuration
-- Attack/Cast/Death animation name overrides
-
-**Audio:**
-- `AttackSfx`, `CastSfx`, `DeathSfx` paths
-
-**Character Select UI:**
-- `CharSelectInfoPath` - Info panel scene
-
-**Gameplay:**
-- `StartingMaxHp`, `StartingGold`, `OrbSlots`
-- `StarterDeck()` - Returns initial card list
-- `StarterRelics()` - Returns initial relic list
-- `CardPoolModel` - Must return your CustomCardPoolModel
-
-**Pool Models (create alongside character):**
-- `CustomCardPoolModel` - Card pool with custom frames, materials, shader colors
-- `CustomRelicPoolModel` - Relic pool
-- `CustomPotionPoolModel` - Potion pool
-- All support `ICustomEnergyIconPool` for custom energy icons
-
-Register with `[Pool(typeof(YourCharacterCardPool))]` on cards.
-""",
-        "custom_ancient": """\
-# BaseLib: CustomAncientModel
-
-Create ancient (legendary) events:
-
-**Key Features:**
-- `OptionPools` system - Manages 3 option slots with weighted random selection
-- Automatic dialogue loading from localization
-- Force-spawn control with `ForceSpawn` / `ForceSpawnConflicts`
-- Map/run history icon paths
-
-**Required Overrides:**
-- `OptionPools` property - Return OptionPools<AncientOption> instance
-- `GenerateOptions()` - Create the 3 options from pools
-- `ProcessOption()` - Handle player's choice
-
-**Localization Format:**
-- `{ID}.intro.text` / `.sfx` - Introduction dialogue
-- `{ID}.option_{N}.text` / `.sfx` - Option dialogue for each slot
-""",
-        "config": """\
-# BaseLib: Configuration System
-
-## SimpleModConfig
-```csharp
-public class MyConfig : SimpleModConfig
-{
-    public override string FileName => "my_config";
-
-    [ConfigSection("General")]
-    public bool EnableFeature { get; set; } = true;
-
-    [ConfigSection("Tuning")]
-    [SliderRange(0.5, 3.0, 0.1)]
-    [SliderLabelFormat("{0:0.00}x")]
-    public double DamageMultiplier { get; set; } = 1.0;
-}
-```
-
-## Registration (in ModEntry.Init()):
-```csharp
-var config = new MyConfig();
-ModConfigRegistry.Register("mymodid", config);
-```
-
-## Access anywhere:
-```csharp
-var config = ModConfigRegistry.Get<MyConfig>("mymodid");
-if (config.EnableFeature) { ... }
-```
-
-## Features:
-- Auto-generates in-game UI with config button in top bar
-- Supports bool (checkbox), double (slider), enum (dropdown)
-- `[ConfigSection("Name")]` groups properties under headers
-- `[SliderRange(min, max, step)]` for numeric ranges
-- Auto-saves after 5s delay when changed
-- Saved to `%APPDATA%\\.baselib\\{ModName}\\{FileName}.cfg`
-""",
-        "card_variables": """\
-# BaseLib: Custom Card Variables
-
-## ExhaustiveVar
-Card's value decreases each time it's played (like Exhaustive keyword).
-```csharp
-new ExhaustiveVar(startingValue).WithTooltip()
-```
-
-## PersistVar
-Value decreases each time played within a single turn.
-```csharp
-new PersistVar(startingValue).WithTooltip()
-```
-
-## RefundVar
-Refunds energy when the card is played.
-```csharp
-new RefundVar(refundAmount).WithTooltip()
-```
-
-All support `.WithTooltip()` for automatic hover tip generation.
-""",
-        "common_actions": """\
-# BaseLib: CommonActions
-
-Static helper methods that reduce boilerplate for common card/power/relic effects:
-
-```csharp
-using BaseLib.Utils;
-
-// Attack from a card (handles targeting, damage calculation, VFX)
-await CommonActions.CardAttack(this, cardPlay, choiceContext);
-
-// Gain block from a card
-await CommonActions.CardBlock(this, choiceContext);
-
-// Draw cards
-await CommonActions.Draw(player, count, choiceContext);
-
-// Apply a power
-await CommonActions.Apply<StrengthPower>(target, amount, source, card);
-await CommonActions.ApplySelf<StrengthPower>(owner, amount, card);
-
-// Card selection UI (pick from a list)
-var selected = await CommonActions.SelectCards(cards, count, message, choiceContext);
-var single = await CommonActions.SelectSingleCard(cards, message, choiceContext);
-```
-
-These handle all the boilerplate around PlayerChoiceContext, ValueProp flags, etc.
-""",
-        "spire_field": """\
-# BaseLib: SpireField<TKey, TVal>
-
-Attach custom data to game objects without modifying their classes:
-
-```csharp
-// Define a field
-private static readonly SpireField<Creature, int> _customCounter =
-    new SpireField<Creature, int>(() => 0);  // default factory
-
-// Use it
-_customCounter[creature] = 5;
-int count = _customCounter[creature];  // returns 5, or 0 for unset creatures
-```
-
-Uses `ConditionalWeakTable` internally - data is garbage collected with the key object.
-""",
-        "weighted_list": """\
-# BaseLib: WeightedList<T>
-
-IList<T> with weighted random selection:
-
-```csharp
-var list = new WeightedList<string>();
-list.Add("common", 70);     // 70% chance
-list.Add("uncommon", 25);   // 25% chance
-list.Add("rare", 5);        // 5% chance
-
-// Pick random (weighted)
-string result = list.GetRandom(rng);
-
-// Pick and remove
-string result = list.GetRandom(rng, removeAfter: true);
-```
-""",
-        "il_patching": """\
-# BaseLib: IL Patching Utilities
-
-## InstructionMatcher
-Fluent builder for matching IL instruction sequences in Harmony transpilers:
-
-```csharp
-var matcher = new InstructionMatcher()
-    .Ldarg_0()
-    .Call(typeof(SomeClass).GetMethod("SomeMethod"))
-    .Stloc(2);
-
-var patcher = new InstructionPatcher(instructions);
-if (patcher.Match(matcher))
-{
-    patcher.Replace(new[] {
-        // replacement instructions
-    });
-}
-```
-
-## InstructionPatcher Methods
-- `Match()` / `MatchStart()` / `MatchEnd()` - Find instruction patterns
-- `Step(n)` - Move cursor position
-- `Replace()` / `ReplaceLastMatch()` - Replace matched instructions
-- `Insert()` / `InsertCopy()` - Insert new instructions
-- `GetLabels()` / `GetOperandLabel()` - Extract IL labels
-- `PrintLog()` / `PrintResult()` - Debug output
-
-## PatchAsyncMoveNext Extension
-For patching async methods (common in STS2):
-```csharp
-harmony.PatchAsyncMoveNext(
-    typeof(CombatManager).GetMethod("StartTurn"),
-    transpiler: new HarmonyMethod(typeof(MyPatch).GetMethod("Transpiler"))
-);
-```
-""",
-        "mod_interop": """\
-# BaseLib: Mod Interop System
-
-Soft-depend on other mods without hard DLL references:
-
-```csharp
-[ModInterop(modId: "othermod")]
-public static class OtherModCompat
-{
-    [InteropTarget(Type = "OtherMod.SomeClass", Name = "SomeMethod")]
-    public static Func<int, bool>? CheckSomething;
-}
-```
-
-At runtime, if "othermod" is loaded, `CheckSomething` gets bound to the real method.
-If not loaded, it stays null. Call with null check:
-
-```csharp
-if (OtherModCompat.CheckSomething?.Invoke(42) == true) { ... }
-```
-""",
-        "utilities": """\
-# BaseLib: Utility Classes
-
-## GodotUtils
-- `CreatureVisualsFromScene(path)` - Load scene as NCreatureVisuals (no CreateVisuals patch needed!)
-- `TransferAllNodes(from, to)` - Move all children between nodes
-
-## ShaderUtils
-- `GenerateHsv(hue, sat, val)` - Create HSV shader material for color-shifted sprites
-
-## GeneratedNodePool<T>
-Object pooling for Godot nodes:
-```csharp
-var pool = new GeneratedNodePool<MyNode>(() => new MyNode());
-pool.Initialize(preWarmCount: 5);
-var node = pool.Get();
-pool.Return(node);  // cleans up signals automatically
-```
-
-## Extension Methods
-- `type.GetPrefix()` - Get mod ID prefix from namespace
-- `dynamicVar.CalculateBlock()` - Calculate block with all modifiers
-- `dynamicVar.WithTooltip()` - Add hover tooltip
-- `harmony.PatchAsyncMoveNext()` - Patch async state machines
-- `control.DrawDebug()` - Debug UI rectangles
-- `float.OrFast()` - Apply FastMode speed multipliers
-- `valueProp.IsPoweredAttack_()` - Check ValueProp flags
-""",
-    }
-    return refs.get(topic, f"Unknown BaseLib topic: {topic}. Available: {', '.join(refs.keys())}")
+    baselib_dir = Path(__file__).parent / "docs" / "baselib"
+    ref_file = baselib_dir / f"{topic}.md"
+    if ref_file.exists():
+        return ref_file.read_text(encoding="utf-8")
+    available = [f.stem for f in baselib_dir.glob("*.md")]
+    return f"Unknown BaseLib topic: {topic}. Available: {', '.join(sorted(available))}"
 
 
 def _launch_game(remote_debug: bool = False, renderer: str | None = None, extra_args: str = "") -> dict:

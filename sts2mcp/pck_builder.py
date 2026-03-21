@@ -132,7 +132,17 @@ def build_pck(
         return {"success": False, "error": f"Source directory not found: {source_dir}"}
 
     entries: list[PckEntry] = []
+    warnings: list[str] = []
     stats = {"scenes": 0, "textures": 0, "other": 0, "total_files": 0, "total_bytes": 0}
+    seen_pck_paths: set[str] = set()
+
+    def add_entry(pck_path: str, data: bytes) -> None:
+        normalized = pck_path.replace("\\", "/")
+        if normalized in seen_pck_paths:
+            warnings.append(f"Skipped duplicate PCK entry: {normalized}")
+            return
+        seen_pck_paths.add(normalized)
+        entries.append(PckEntry(normalized, data))
 
     # Collect all files
     for file_path in sorted(source.rglob('*')):
@@ -142,9 +152,15 @@ def build_pck(
             continue
 
         rel_path = str(file_path.relative_to(source)).replace('\\', '/')
+        if ".." in rel_path.split("/"):
+            warnings.append(f"Skipped path with traversal: {rel_path}")
+            continue
         pck_path = f"{base_prefix}{rel_path}" if base_prefix else rel_path
 
         ext = file_path.suffix.lower()
+
+        if ext == ".import":
+            continue
 
         if ext == '.png' and convert_pngs:
             # Convert PNG to .ctex and create .import remap
@@ -154,32 +170,33 @@ def build_pck(
                 ctex_pck_path = f".godot/imported/{ctex_filename}"
 
                 # Add the .ctex file
-                entries.append(PckEntry(ctex_pck_path, ctex_data))
+                add_entry(ctex_pck_path, ctex_data)
 
                 # Add the .import remap
                 import_content = generate_import_file(pck_path, ctex_pck_path)
-                entries.append(PckEntry(pck_path + ".import", import_content.encode('utf-8')))
+                add_entry(pck_path + ".import", import_content.encode('utf-8'))
 
                 # Also add the raw PNG (some code paths use it)
                 raw_data = file_path.read_bytes()
-                entries.append(PckEntry(pck_path, raw_data))
+                add_entry(pck_path, raw_data)
 
                 stats["textures"] += 1
             except Exception as e:
                 # Fallback: just add raw PNG
+                warnings.append(f"PNG conversion failed for {rel_path}: {type(e).__name__}: {e}")
                 raw_data = file_path.read_bytes()
-                entries.append(PckEntry(pck_path, raw_data))
+                add_entry(pck_path, raw_data)
                 stats["other"] += 1
 
         elif ext == '.tscn':
             data = file_path.read_bytes()
-            entries.append(PckEntry(pck_path, data))
+            add_entry(pck_path, data)
             stats["scenes"] += 1
 
         else:
             # .json, .tres, .cfg, etc. — pack as-is
             data = file_path.read_bytes()
-            entries.append(PckEntry(pck_path, data))
+            add_entry(pck_path, data)
             stats["other"] += 1
 
     if not entries:
@@ -232,6 +249,7 @@ def build_pck(
     stats["success"] = True
     stats["output"] = str(output)
     stats["output_size"] = output.stat().st_size
+    stats["warnings"] = warnings
     return stats
 
 
@@ -289,7 +307,7 @@ def list_pck_contents(pck_path: str) -> dict:
                             f.seek(pos)
                             found = True
                             break
-                    except:
+                    except (struct.error, IOError):
                         pass
                 pos += PCK_ALIGNMENT
             if not found:

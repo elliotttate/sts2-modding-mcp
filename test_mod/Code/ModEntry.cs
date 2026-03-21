@@ -17,8 +17,10 @@ namespace MCPTest;
 public static class ModEntry
 {
     private static Harmony? _harmony;
+    public static Harmony? GetHarmony() => _harmony;
     private static TcpListener? _listener;
     private static Thread? _serverThread;
+    private static volatile bool _shutdownRequested;
     private static readonly string LogPath = Path.Combine(
         System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData),
         "MCPTest", "mcptest.log");
@@ -32,6 +34,10 @@ public static class ModEntry
 
             // Capture main thread SynchronizationContext (MUST be done here, on the main thread)
             MainThreadDispatcher.Capture();
+
+            ExceptionMonitor.Initialize();
+            GameLogCapture.Initialize();
+            EventTracker.Record("mod_init", "MCPTest initializing");
 
             // Register all custom relics
             try
@@ -63,6 +69,7 @@ public static class ModEntry
 
             Log.Warn("[MCPTest] v2.0 loaded! Bridge on port 21337.");
             WriteLog("=== MCPTest v2.0 Loaded ===");
+            EventTracker.Record("mod_loaded", "MCPTest v2.0 loaded, bridge on port 21337");
         }
         catch (Exception ex)
         {
@@ -77,8 +84,15 @@ public static class ModEntry
         {
             File.AppendAllText(LogPath, $"[{DateTime.Now:HH:mm:ss}] {message}\n");
         }
-        catch { }
+        catch (Exception ex)
+        {
+            // Last-resort fallback: write to Godot's output so disk issues don't go silent
+            GD.PrintErr($"[MCPTest] WriteLog failed ({ex.GetType().Name}): {message}");
+        }
     }
+
+    public static string GetLogPath()
+        => LogPath;
 
     private static void StartBridgeServer()
     {
@@ -98,22 +112,50 @@ public static class ModEntry
             _listener.Start();
             WriteLog("TCP listener started.");
 
-            while (true)
+            while (!_shutdownRequested)
             {
+                // Use polling so the loop can check _shutdownRequested
+                if (!_listener.Pending())
+                {
+                    Thread.Sleep(50);
+                    continue;
+                }
                 var client = _listener.AcceptTcpClient();
                 ThreadPool.QueueUserWorkItem(_ => HandleClient(client));
             }
         }
+        catch (SocketException) when (_shutdownRequested)
+        {
+            // Expected during shutdown — listener was stopped
+        }
         catch (Exception ex)
         {
-            WriteLog($"Server error: {ex.Message}");
+            if (!_shutdownRequested)
+                WriteLog($"Server error: {ex.Message}");
         }
+        finally
+        {
+            WriteLog("TCP listener stopped.");
+        }
+    }
+
+    /// <summary>
+    /// Gracefully stop the bridge server. Safe to call multiple times.
+    /// </summary>
+    public static void Shutdown()
+    {
+        if (_shutdownRequested) return;
+        _shutdownRequested = true;
+
+        try { _listener?.Stop(); _listener?.Dispose(); } catch { }
+        WriteLog("Bridge server shutdown requested.");
     }
 
     private static void HandleClient(TcpClient client)
     {
         try
         {
+            client.ReceiveTimeout = 60_000; // 60s timeout prevents hung client threads
             using (client)
             using (var stream = client.GetStream())
             using (var reader = new StreamReader(stream, new UTF8Encoding(false)))

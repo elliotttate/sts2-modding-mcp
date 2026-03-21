@@ -5,8 +5,19 @@ description = "MCP server for Slay the Spire 2 modding - reverse-engineered game
 requires-python = ">=3.11"
 dependencies = [
     "mcp[cli]>=1.0.0",
+    "google-genai>=1.0.0",
+    "Pillow>=10.0",
+    "rembg>=2.0",
+    "numpy>=1.24",
 ]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

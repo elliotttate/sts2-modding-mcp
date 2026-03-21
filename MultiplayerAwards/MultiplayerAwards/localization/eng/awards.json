@@ -1,0 +1,104 @@
+{
+  "awards": {
+    "damage_dealer": {
+      "title": "Damage Dealer",
+      "description": "Dealt {value} damage. Violence IS the answer."
+    },
+    "one_punch": {
+      "title": "One-Punch",
+      "description": "Landed a {value} damage hit in one shot!"
+    },
+    "overkill_expert": {
+      "title": "Overkill Expert",
+      "description": "Wasted {value} damage on corpses. Chill."
+    },
+    "monster_slayer": {
+      "title": "Monster Slayer",
+      "description": "Finished off {value} enemies. Last-hit king."
+    },
+    "card_shark": {
+      "title": "Card Shark",
+      "description": "Played {value} cards. Couldn't stop shuffling."
+    },
+    "the_tank": {
+      "title": "The Tank",
+      "description": "Absorbed {value} damage. Built different."
+    },
+    "iron_wall": {
+      "title": "Iron Wall",
+      "description": "Generated {value} block. An immovable object."
+    },
+    "guardian_angel": {
+      "title": "Guardian Angel",
+      "description": "Shielded allies with {value} block."
+    },
+    "damage_sponge": {
+      "title": "Damage Sponge",
+      "description": "Faced {value} total incoming damage. A magnet for pain."
+    },
+    "clutch_healer": {
+      "title": "Clutch Healer",
+      "description": "Restored {value} HP. The team medic."
+    },
+    "potion_master": {
+      "title": "Potion Master",
+      "description": "Chugged {value} potions. Totally not addicted."
+    },
+    "debuff_royalty": {
+      "title": "Debuff Royalty",
+      "description": "Applied {value} debuffs. A walking curse."
+    },
+    "power_surge": {
+      "title": "Power Surge",
+      "description": "Triggered {value} power applications. Scaling monster."
+    },
+    "efficient_killer": {
+      "title": "Efficient Killer",
+      "description": "Averaged {value} damage per card played."
+    },
+    "energy_miser": {
+      "title": "Energy Miser",
+      "description": "Got {value} damage per energy. Peak ROI."
+    },
+    "speed_demon": {
+      "title": "Speed Demon",
+      "description": "Won with just {value} cards. No wasted motion."
+    },
+    "glass_cannon": {
+      "title": "Glass Cannon",
+      "description": "Hits hard. Gets hit harder."
+    },
+    "afk_award": {
+      "title": "AFK Award",
+      "description": "Played {value} cards. Were you even there?"
+    },
+    "the_hoarder": {
+      "title": "The Hoarder",
+      "description": "Hoarded {value} gold. What were you saving for?"
+    },
+    "pyromaniac": {
+      "title": "Pyromaniac",
+      "description": "Burned {value} cards. Everything must go."
+    },
+    "draw_addict": {
+      "title": "Draw Addict",
+      "description": "Drew {value} cards. Addicted to card draw."
+    },
+    "the_pacifist": {
+      "title": "The Pacifist",
+      "description": "Only {value} damage. A true pacifist."
+    },
+    "die_hard": {
+      "title": "Die Hard",
+      "description": "Died {value} time(s). Kept coming back."
+    },
+    "mvp": {
+      "title": "MVP",
+      "description": "The hero this run needed."
+    },
+    "team_player": {
+      "title": "Team Player",
+      "description": "Always had their teammates' backs."
+    }
+  }
+}

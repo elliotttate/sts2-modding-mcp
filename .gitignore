@@ -10,3 +10,20 @@ build/
 
 # Decompiled game source (regenerated from sts2.dll)
 decompiled/
+
+# Recovered Godot project (regenerated from game PCK)
+recovered/
+
+# GDRE Tools binary (downloaded from github.com/GDRETools/gdsdecomp/releases)
+tools/
+
+# .NET build artifacts
+bin/
+obj/
+
+# Temporary scaffolds
+.tmp_scaffold/
+
+# IDE
+.vs/
+*.user
