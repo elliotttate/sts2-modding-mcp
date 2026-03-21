@@ -1,6 +1,6 @@
 [project]
 name = "sts2-modding-mcp"
-version = "3.1.0"
+version = "3.2.0"
 description = "MCP server for Slay the Spire 2 modding - reverse-engineered game data, mod scaffolding, building, and deployment"
 requires-python = ">=3.11"
 dependencies = [
