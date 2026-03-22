@@ -318,8 +318,11 @@ venv\Scripts\activate.bat
 # macOS / Linux:
 # source venv/bin/activate
 
-# Install dependencies
-pip install "mcp[cli]"
+# Install the MCP server and all required dependencies
+pip install .
+
+# Optional: install image generation dependencies (generate_art, process_art tools)
+# pip install ".[images]"
 ```
 
 ### 2. Decompile the game (C#)
@@ -360,9 +363,35 @@ export STS2_DECOMPILED_DIR="/path/to/decompiled"
 export GDRE_TOOLS_PATH="/path/to/gdre_tools.exe"  # optional, defaults to tools/gdre_tools.exe
 ```
 
-### 5. Register with Claude Code
+### 5. Connect to an AI assistant
 
-Point the MCP config at the **venv's Python** so dependencies are always available — no need to activate the venv first.
+The MCP server connects to any AI tool that supports the [Model Context Protocol](https://modelcontextprotocol.io/). Point the config at the **venv's Python** so dependencies are always available — no need to activate the venv first.
+
+> **Important:** Replace `/path/to/sts2-modding-mcp` below with the actual path where you cloned the repo. On **macOS / Linux**, use `venv/bin/python` instead of `venv/Scripts/python.exe`.
+
+#### Claude Desktop
+
+Edit your Claude Desktop config file:
+
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+
+Add the following (create the file if it doesn't exist):
+
+```json
+{
+  "mcpServers": {
+    "sts2-modding": {
+      "command": "/path/to/sts2-modding-mcp/venv/Scripts/python.exe",
+      "args": ["/path/to/sts2-modding-mcp/run.py"]
+    }
+  }
+}
+```
+
+Restart Claude Desktop. The server tools should appear in the toolbox icon (hammer) at the bottom of the chat input.
+
+#### Claude Code (CLI)
 
 **Option A — Project scope** (`.mcp.json` in your working directory):
 
@@ -377,8 +406,6 @@ Point the MCP config at the **venv's Python** so dependencies are always availab
 }
 ```
 
-> **macOS / Linux:** use `venv/bin/python` instead of `venv/Scripts/python.exe`.
-
 **Option B — User scope** (`~/.claude/settings.json` under `mcpServers`):
 
 ```json
@@ -392,9 +419,16 @@ Point the MCP config at the **venv's Python** so dependencies are always availab
 }
 ```
 
-Replace `/path/to/sts2-modding-mcp` with the actual path where you cloned the repo.
-
 Restart Claude Code and the server should appear in `/mcp`.
+
+#### Cursor / Windsurf / Other MCP Clients
+
+Most MCP-compatible editors use a similar JSON config. The key fields are:
+
+- **command:** full path to the venv Python executable
+- **args:** full path to `run.py`
+
+Check your editor's MCP documentation for where to place the config.
 
 ## Usage Examples
 

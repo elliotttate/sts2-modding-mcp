@@ -1,1 +1,8 @@
 mcp[cli]>=1.0.0
+
+# Optional — only needed for image generation tools (generate_art, process_art)
+# Uncomment or install separately:  pip install Pillow numpy rembg google-genai
+# google-genai>=1.0.0
+# Pillow>=10.0
+# rembg>=2.0
+# numpy>=1.24

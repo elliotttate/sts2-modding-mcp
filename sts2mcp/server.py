@@ -17,7 +17,24 @@ from .pck_builder import build_pck, list_pck_contents
 from .character_assets import get_character_asset_paths, scaffold_character_assets
 from .analysis import CodeAnalyzer
 from . import gdre_tools
-from . import image_gen
+
+# image_gen is imported lazily — it pulls in numpy, Pillow, rembg which are
+# heavy / optional deps.  Importing eagerly would crash the server when only
+# mcp[cli] is installed.
+image_gen = None
+
+def _get_image_gen():
+    global image_gen
+    if image_gen is None:
+        try:
+            from . import image_gen as _ig
+            image_gen = _ig
+        except ImportError as e:
+            raise RuntimeError(
+                "Image tools require extra dependencies. "
+                "Install them with:  pip install Pillow numpy rembg google-genai"
+            ) from e
+    return image_gen
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -191,7 +208,7 @@ async def list_tools() -> list[types.Tool]:
                 "systems (hooks, pools, combat_deep_dive, dynamic_vars, game_actions, mechanics, vfx_scenes, overlays), "
                 "infrastructure (harmony_patches, localization, building, project_structure, resource_loading, godot_ui_construction), "
                 "BaseLib (custom_keywords_and_piles, mod_config_integration), advanced (reflection_patterns, advanced_harmony, "
-                "multiplayer_networking, rng_and_determinism, save_file_format), and testing/debugging "
+                "multiplayer_networking, rng_and_determinism, save_file_format, fastmp), and testing/debugging "
                 "(debugging, testing, autoslay, console, bridge_setup, troubleshooting, workflows, game_log_parsing)."
             ),
             inputSchema={
@@ -215,7 +232,7 @@ async def list_tools() -> list[types.Tool]:
                             "image_generation", "testing", "autoslay",
                             "enchantments", "orbs", "game_actions",
                             "overlays", "dynamic_vars", "mechanics",
-                            "vfx_scenes", "ui_elements",
+                            "vfx_scenes", "ui_elements", "fastmp",
                         ],
                     },
                 },
@@ -3892,7 +3909,8 @@ async def _handle_tool(name: str, args: dict):
 
     # ── Image Generation & Processing ──
     elif name == "generate_art":
-        return await image_gen.generate_and_process(
+        ig = _get_image_gen()
+        return await ig.generate_and_process(
             description=args["description"],
             asset_type=args["asset_type"],
             name=args["name"],
@@ -3901,7 +3919,8 @@ async def _handle_tool(name: str, args: dict):
         )
 
     elif name == "process_art":
-        return await image_gen.process_existing_image(
+        ig = _get_image_gen()
+        return await ig.process_existing_image(
             image_path=args["image_path"],
             asset_type=args["asset_type"],
             name=args["name"],
@@ -3909,11 +3928,12 @@ async def _handle_tool(name: str, args: dict):
         )
 
     elif name == "list_art_profiles":
+        ig = _get_image_gen()
         profiles = {}
-        for atype, profile in image_gen.PROFILES.items():
+        for atype, profile in ig.PROFILES.items():
             profiles[atype] = {
                 "background": profile.get("bg", "per-variant"),
-                "generation_size": image_gen.GEN_SIZES.get(atype, (512, 512)),
+                "generation_size": ig.GEN_SIZES.get(atype, (512, 512)),
                 "variants": [
                     {
                         "path": v["rel_path"],
