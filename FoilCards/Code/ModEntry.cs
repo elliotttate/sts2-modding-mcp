@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Net.Sockets;
+using System.Text;
 using Godot;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Modding;
@@ -13,47 +15,42 @@ public static class ModEntry
     private static int _applyCount = 0;
     private static readonly Dictionary<ulong, ShaderMaterial> _foilMaterials = new();
 
-    private const float MaxTiltDeg = 20.0f;  // More aggressive tilt
-    private const float TiltSmooth = 0.3f;   // Faster response
-    private const float LightSmooth = 0.3f;
-
     public static void Init()
     {
         try
         {
             Log.Warn("[FoilCards] Init...");
 
-            // This exact pattern worked before — Task.Run with direct Godot access
+            // Background thread: apply foil shader to cards
             System.Threading.Tasks.Task.Run(async () =>
             {
                 await System.Threading.Tasks.Task.Delay(3000);
-                Log.Warn("[FoilCards] Loop running.");
-                int loopCount = 0;
+                Log.Warn("[FoilCards] Foil applicator running.");
                 while (true)
                 {
-                    loopCount++;
                     try
                     {
                         var tree = Engine.GetMainLoop() as SceneTree;
                         if (tree?.Root != null)
-                        {
-                            int found = 0;
-                            int total = 0;
-
-                            // Walk ALL windows, not just the main root
-                            foreach (var window in tree.Root.GetTree().Root.GetChildren())
-                            {
-                                ProcessRecursive(window, ref found, ref total);
-                            }
-                            // Also walk the root itself
-                            ProcessRecursive(tree.Root, ref found, ref total);
-
-                            if (loopCount <= 3 || (loopCount % 20 == 0 && loopCount <= 100))
-                                Log.Warn($"[FoilCards] Loop #{loopCount}: {total} nodes, {found} cards, {_applyCount} foils");
-                        }
+                            WalkAndApply(tree.Root);
                     }
                     catch { }
-                    await System.Threading.Tasks.Task.Delay(30); // ~33fps for smoother tilt
+                    await System.Threading.Tasks.Task.Delay(500);
+                }
+            });
+
+            // Auto-start the tilt loop via bridge after a delay
+            System.Threading.Tasks.Task.Run(async () =>
+            {
+                await System.Threading.Tasks.Task.Delay(5000);
+                try
+                {
+                    SendBridgeCommand("start_foil_tilt");
+                    Log.Warn("[FoilCards] Started foil tilt loop via bridge.");
+                }
+                catch (Exception ex)
+                {
+                    Log.Warn($"[FoilCards] Could not start tilt loop: {ex.Message}");
                 }
             });
 
@@ -65,105 +62,21 @@ public static class ModEntry
         }
     }
 
-    private static readonly HashSet<string> _loggedTypes = new();
-
-    private static void ProcessRecursive(Node node, ref int found, ref int total)
+    private static void WalkAndApply(Node node)
     {
-        total++;
-
         if (node is NCard card)
-        {
-            found++;
-            ProcessCard(card);
-        }
-        else if (node is Control ctrl && node.GetType().FullName == "MegaCrit.Sts2.Core.Nodes.Cards.NCard")
-        {
-            found++;
-            ProcessCardByReflection(ctrl);
-        }
-
-        // Log unique type names on first loop to understand the tree
-        if (total <= 50 && _loggedTypes.Count < 30)
-        {
-            var tn = node.GetType().FullName ?? "?";
-            if (_loggedTypes.Add(tn))
-                Log.Warn($"[FoilCards] Type: {tn}");
-        }
+            TryApplyFoil(card);
 
         int count;
         try { count = node.GetChildCount(); } catch { return; }
         for (int i = 0; i < count; i++)
         {
-            try { ProcessRecursive(node.GetChild(i), ref found, ref total); } catch { }
+            try { WalkAndApply(node.GetChild(i)); } catch { }
         }
     }
 
-    private static void ProcessCard(NCard card)
+    private static void TryApplyFoil(NCard card)
     {
-        try
-        {
-            if (!card.IsNodeReady()) return;
-            var portrait = card.GetNodeOrNull<TextureRect>("%Portrait");
-            if (portrait == null || !portrait.Visible || portrait.Texture == null) return;
-
-            var id = portrait.GetInstanceId();
-            ShaderMaterial? mat;
-
-            // Apply or re-apply foil
-            if (_foilMaterials.TryGetValue(id, out mat))
-            {
-                if (portrait.Material != mat && portrait.Material == null)
-                    portrait.Material = mat;
-                if (portrait.Material != mat) return;
-            }
-            else
-            {
-                if (portrait.Material != null) return;
-                mat = FoilShader.CreateMaterial();
-                portrait.Material = mat;
-                _foilMaterials[id] = mat;
-                _applyCount++;
-                if (_applyCount <= 20)
-                    Log.Warn($"[FoilCards] Applied foil #{_applyCount}");
-            }
-
-            // --- Update light angle ---
-            var mouseGlobal = card.GetGlobalMousePosition();
-            var cardRect = card.GetGlobalRect();
-            if (cardRect.Size.X < 1 || cardRect.Size.Y < 1) return;
-
-            var cardCenter = cardRect.Position + cardRect.Size * 0.5f;
-            var relative = (mouseGlobal - cardCenter) / (cardRect.Size * 0.5f);
-            relative = relative.Clamp(new Vector2(-1.5f, -1.5f), new Vector2(1.5f, 1.5f));
-
-            var currentAngle = (Vector2)mat.GetShaderParameter("light_angle");
-            var smoothedAngle = currentAngle.Lerp(relative, LightSmooth);
-            mat.SetShaderParameter("light_angle", smoothedAngle);
-
-            // --- Physical card tilt ---
-            // Rotate the Body/CardContainer child instead of the card itself,
-            // because the card library's grid layout resets card.RotationDegrees.
-            bool mouseOver = cardRect.HasPoint(mouseGlobal);
-            float proximity = mouseOver ? 1.0f : Mathf.Max(0, 1.0f - (relative.Length() - 1.0f) * 2.0f);
-            float targetRot = -relative.X * MaxTiltDeg * proximity;
-
-            // Find the Body (CardContainer) child — this is the visual content
-            var body = card.GetNodeOrNull<Control>("%CardContainer");
-            if (body == null) body = card.GetNodeOrNull<Control>("CardContainer");
-            if (body != null)
-            {
-                float currentRot = body.RotationDegrees;
-                float newRot = Mathf.Lerp(currentRot, targetRot, TiltSmooth);
-                body.PivotOffset = body.Size * 0.5f;
-                body.RotationDegrees = newRot;
-            }
-        }
-        catch { }
-    }
-
-    private static void ProcessCardByReflection(Control card)
-    {
-        // Same as ProcessCard but using the Control type (when is NCard fails due to assembly mismatch)
         try
         {
             if (!card.IsNodeReady()) return;
@@ -177,50 +90,29 @@ public static class ModEntry
             {
                 if (portrait.Material != mat && portrait.Material == null)
                     portrait.Material = mat;
-                if (portrait.Material != mat) return;
-            }
-            else
-            {
-                if (portrait.Material != null) return;
-                mat = FoilShader.CreateMaterial();
-                portrait.Material = mat;
-                _foilMaterials[id] = mat;
-                _applyCount++;
-                if (_applyCount <= 20)
-                    Log.Warn($"[FoilCards] Applied foil #{_applyCount} (via reflection)");
+                return;
             }
 
-            // Light angle
-            var mouseGlobal = card.GetGlobalMousePosition();
-            var cardRect = card.GetGlobalRect();
-            if (cardRect.Size.X < 1 || cardRect.Size.Y < 1) return;
+            if (portrait.Material != null) return;
 
-            var cardCenter = cardRect.Position + cardRect.Size * 0.5f;
-            var relative = (mouseGlobal - cardCenter) / (cardRect.Size * 0.5f);
-            relative = relative.Clamp(new Vector2(-1.5f, -1.5f), new Vector2(1.5f, 1.5f));
-
-            var currentAngle = (Vector2)mat.GetShaderParameter("light_angle");
-            mat.SetShaderParameter("light_angle", currentAngle.Lerp(relative, LightSmooth));
-
-            // Tilt
-            bool mouseOver = cardRect.HasPoint(mouseGlobal);
-            float proximity = mouseOver ? 1.0f : Mathf.Max(0, 1.0f - (relative.Length() - 1.0f) * 2.0f);
-            float targetRot = -relative.X * MaxTiltDeg * proximity;
-            float newRot = Mathf.Lerp(card.RotationDegrees, targetRot, TiltSmooth);
-            card.PivotOffset = card.Size * 0.5f;
-            card.RotationDegrees = newRot;
+            mat = FoilShader.CreateMaterial();
+            portrait.Material = mat;
+            _foilMaterials[id] = mat;
+            _applyCount++;
+            if (_applyCount <= 20)
+                Log.Warn($"[FoilCards] Applied foil #{_applyCount}");
         }
         catch { }
     }
 
-    public static void ApplyFoilToAllCards()
+    /// <summary>Send a JSON-RPC request to the MCPTest bridge on localhost:21337</summary>
+    private static void SendBridgeCommand(string method)
     {
-        try
-        {
-            var tree = Engine.GetMainLoop() as SceneTree;
-            int found = 0, total = 0;
-            if (tree?.Root != null) ProcessRecursive(tree.Root, ref found, ref total);
-        }
-        catch { }
+        using var client = new TcpClient("127.0.0.1", 21337);
+        var json = $"{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"{method}\"}}";
+        var data = Encoding.UTF8.GetBytes(json + "\n");
+        client.GetStream().Write(data, 0, data.Length);
     }
+
+    public static void ApplyFoilToAllCards() { }
 }

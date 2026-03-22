@@ -115,6 +115,9 @@ public static class BridgeHandler
                 "autoslay_status" => MainThreadDispatcher.Invoke(() => AutoSlayGetStatus()),
                 "autoslay_configure" => AutoSlayConfigure(root),
                 "navigate_menu" => MainThreadDispatcher.Invoke(() => NavigateMenu(root)),
+                "find_cards" => MainThreadDispatcher.Invoke(() => FindCards(root)),
+                "start_foil_tilt" => MainThreadDispatcher.Invoke(() => StartFoilTilt()),
+                "stop_foil_tilt" => MainThreadDispatcher.Invoke(() => StopFoilTilt()),
                 "click_node" => MainThreadDispatcher.Invoke(() => ClickNode(root)),
                 _ => new { error = $"Unknown method: {method}" },
             };
@@ -3820,5 +3823,217 @@ public static class BridgeHandler
             return new { error = $"Don't know how to click {node.GetType().Name} at {path}" };
         }
         catch (Exception ex) { return new { error = ex.Message }; }
+    }
+
+    // ─── Card Finder / Tilt Tester ──────────────────────────────────────────
+
+    private static object FindCards(JsonElement root)
+    {
+        try
+        {
+            float setRotation = 0f;
+            bool doRotate = false;
+            if (root.TryGetProperty("params", out var p))
+            {
+                if (p.TryGetProperty("rotation", out var rotProp))
+                {
+                    setRotation = (float)rotProp.GetDouble();
+                    doRotate = true;
+                }
+            }
+
+            var tree = GodotEngine.GetMainLoop() as SceneTree;
+            if (tree?.Root == null)
+                return new { error = "SceneTree not available" };
+
+            var results = new List<object>();
+            int totalNodes = 0;
+            FindCardsRecursive(tree.Root, results, ref totalNodes, doRotate, setRotation);
+
+            // Also update the known card IDs for the tilt loop
+            _knownCardIds.Clear();
+            foreach (var r2 in results)
+            {
+                if (r2 is Dictionary<string, object?> info && info.ContainsKey("_instanceId"))
+                    _knownCardIds.Add((ulong)info["_instanceId"]!);
+            }
+
+            return new
+            {
+                total_nodes = totalNodes,
+                cards_found = results.Count,
+                cards = results,
+                rotation_applied = doRotate ? setRotation : (float?)null,
+            };
+        }
+        catch (Exception ex) { return new { error = ex.Message }; }
+    }
+
+    private static void FindCardsRecursive(Node node, List<object> results, ref int totalNodes, bool doRotate, float rotation)
+    {
+        totalNodes++;
+
+        // Check by type name (handles assembly mismatch) AND by is check
+        bool isCard = node.GetType().FullName == "MegaCrit.Sts2.Core.Nodes.Cards.NCard"
+                    || node is MegaCrit.Sts2.Core.Nodes.Cards.NCard;
+
+        if (isCard && node is Control ctrl)
+        {
+            var info = new Dictionary<string, object?>
+            {
+                ["name"] = ctrl.Name.ToString(),
+                ["type"] = node.GetType().Name,
+                ["position"] = $"{ctrl.GlobalPosition}",
+                ["size"] = $"{ctrl.Size}",
+                ["rotation"] = ctrl.RotationDegrees,
+                ["visible"] = ctrl.Visible,
+                ["_instanceId"] = ctrl.GetInstanceId(),
+            };
+
+            // Check for portrait
+            var portrait = ctrl.GetNodeOrNull<TextureRect>("%Portrait");
+            if (portrait != null)
+            {
+                info["portrait_visible"] = portrait.Visible;
+                info["portrait_material"] = portrait.Material?.GetType().Name;
+                info["portrait_texture"] = portrait.Texture != null;
+            }
+
+            if (doRotate)
+            {
+                ctrl.PivotOffset = ctrl.Size * 0.5f;
+                ctrl.RotationDegrees = rotation;
+                info["rotation_set_to"] = rotation;
+            }
+
+            results.Add(info);
+        }
+
+        int count;
+        try { count = node.GetChildCount(); } catch { return; }
+        for (int i = 0; i < count; i++)
+        {
+            try { FindCardsRecursive(node.GetChild(i), results, ref totalNodes, doRotate, rotation); }
+            catch { }
+        }
+    }
+
+    // ─── Continuous Foil Tilt Loop ──────────────────────────────────────────
+
+    private static bool _foilTiltRunning = false;
+    private static readonly List<ulong> _knownCardIds = new();
+    private const float FoilMaxTilt = 15.0f;
+    private const float FoilTiltLerp = 0.15f;
+    private const float FoilLightLerp = 0.15f;
+
+    private static object StartFoilTilt()
+    {
+        if (_foilTiltRunning)
+            return new { success = true, status = "already_running" };
+
+        _foilTiltRunning = true;
+
+        System.Threading.Tasks.Task.Run(async () =>
+        {
+            ModEntry.WriteLog("[FoilTilt] Started");
+            while (_foilTiltRunning)
+            {
+                try
+                {
+                    // Discover cards periodically (blocking call, every ~1s)
+                    if (_refreshCounter++ % 30 == 0)
+                    {
+                        try { MainThreadDispatcher.Invoke(() => RefreshCardList()); }
+                        catch { }
+                    }
+
+                    // Apply tilt via Invoke (blocking — runs on main thread synchronously)
+                    if (_knownCardIds.Count > 0)
+                    {
+                        try { MainThreadDispatcher.Invoke(() => ApplyTiltToKnownCards()); }
+                        catch { }
+                    }
+                }
+                catch { }
+                await System.Threading.Tasks.Task.Delay(50); // ~20fps
+            }
+            ModEntry.WriteLog("[FoilTilt] Stopped");
+        });
+
+        return new { success = true, status = "started" };
+    }
+
+    private static object StopFoilTilt()
+    {
+        _foilTiltRunning = false;
+        return new { success = true, status = "stopped" };
+    }
+
+    private static int _refreshCounter = 0;
+
+    private static void RefreshCardList()
+    {
+        // Only rebuild if empty — find_cards populates this too
+        if (_knownCardIds.Count > 0) return;
+
+        var tree = GodotEngine.GetMainLoop() as SceneTree;
+        if (tree?.Root == null) return;
+        CollectCardIds(tree.Root);
+    }
+
+    private static void CollectCardIds(Node node)
+    {
+        if (node is MegaCrit.Sts2.Core.Nodes.Cards.NCard)
+            _knownCardIds.Add(node.GetInstanceId());
+
+        int count;
+        try { count = node.GetChildCount(); } catch { return; }
+        for (int i = 0; i < count; i++)
+        {
+            try { CollectCardIds(node.GetChild(i)); } catch { }
+        }
+    }
+
+    private static void ApplyTiltToKnownCards()
+    {
+        foreach (var cardId in _knownCardIds)
+        {
+            try
+            {
+                var cardObj = GodotObject.InstanceFromId(cardId);
+                if (cardObj is not Control card) continue;
+
+                var portrait = card.GetNodeOrNull<TextureRect>("%Portrait");
+                if (portrait == null || !portrait.Visible) continue;
+
+                var mouseGlobal = card.GetGlobalMousePosition();
+                var cardRect = card.GetGlobalRect();
+                if (cardRect.Size.X < 1 || cardRect.Size.Y < 1) continue;
+
+                var cardCenter = cardRect.Position + cardRect.Size * 0.5f;
+                var relative = (mouseGlobal - cardCenter) / (cardRect.Size * 0.5f);
+                relative = relative.Clamp(new Vector2(-1.5f, -1.5f), new Vector2(1.5f, 1.5f));
+
+                // Shader light
+                if (portrait.Material is ShaderMaterial mat)
+                {
+                    try
+                    {
+                        var cur = mat.GetShaderParameter("light_angle").AsVector2();
+                        mat.SetShaderParameter("light_angle", cur.Lerp(relative, FoilLightLerp));
+                    }
+                    catch { mat.SetShaderParameter("light_angle", relative); }
+                }
+
+                // Tilt
+                bool mouseOver = cardRect.HasPoint(mouseGlobal);
+                float proximity = mouseOver ? 1.0f : Mathf.Max(0, 1.0f - (relative.Length() - 1.0f) * 2.0f);
+                float targetRot = -relative.X * FoilMaxTilt * proximity;
+
+                card.PivotOffset = card.Size * 0.5f;
+                card.RotationDegrees = Mathf.Lerp(card.RotationDegrees, targetRot, FoilTiltLerp);
+            }
+            catch { }
+        }
     }
 }
