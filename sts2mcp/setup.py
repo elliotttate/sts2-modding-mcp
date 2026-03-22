@@ -135,6 +135,25 @@ def find_game_install() -> str | None:
 
 # ─── Tool checks ─────────────────────────────────────────────────────────────
 
+# dotnet tools install to ~/.dotnet/tools on all platforms
+_DOTNET_TOOLS_DIR = os.path.join(os.path.expanduser("~"), ".dotnet", "tools")
+
+
+def _find_ilspycmd() -> str | None:
+    """Locate ilspycmd executable — check PATH, then ~/.dotnet/tools."""
+    found = shutil.which("ilspycmd")
+    if found:
+        return found
+    # On Windows, shutil.which + env PATH augmentation is unreliable,
+    # so check the dotnet tools directory directly.
+    if sys.platform == "win32":
+        exe = os.path.join(_DOTNET_TOOLS_DIR, "ilspycmd.exe")
+    else:
+        exe = os.path.join(_DOTNET_TOOLS_DIR, "ilspycmd")
+    if os.path.isfile(exe):
+        return exe
+    return None
+
 
 def check_dotnet() -> dict:
     """Check if .NET SDK is installed."""
@@ -149,14 +168,17 @@ def check_dotnet() -> dict:
 
 def check_ilspycmd() -> dict:
     """Check if ilspycmd is available."""
-    env = {**os.environ, "PATH": os.environ.get("PATH", "") + os.pathsep + os.path.expanduser("~/.dotnet/tools")}
+    exe = _find_ilspycmd()
+    if not exe:
+        return {"installed": False, "version": None}
     try:
-        r = subprocess.run(["ilspycmd", "--version"], capture_output=True, text=True, timeout=10, env=env)
+        r = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=10)
         if r.returncode == 0:
-            return {"installed": True, "version": r.stdout.strip()}
+            return {"installed": True, "version": r.stdout.strip(), "path": exe}
     except Exception:
         pass
-    return {"installed": False, "version": None}
+    # Binary exists but version check failed — still usable
+    return {"installed": True, "version": None, "path": exe}
 
 
 def install_ilspycmd() -> dict:
@@ -192,23 +214,24 @@ def run_decompile(game_dir: str, decompiled_dir: str | None = None) -> dict:
     if not dll_path.exists():
         return {"success": False, "error": f"sts2.dll not found at {dll_path}"}
 
+    exe = _find_ilspycmd()
+    if not exe:
+        return {"success": False, "error": "ilspycmd not found — install with: dotnet tool install -g ilspycmd"}
+
     out_dir = Path(decompiled_dir) if decompiled_dir else DECOMPILED_DIR_DEFAULT
     if out_dir.exists():
         shutil.rmtree(str(out_dir))
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    env = {**os.environ, "PATH": os.environ.get("PATH", "") + os.pathsep + os.path.expanduser("~/.dotnet/tools")}
     try:
         r = subprocess.run(
-            ["ilspycmd", "-p", "-o", str(out_dir), str(dll_path)],
-            capture_output=True, text=True, timeout=300, env=env,
+            [exe, "-p", "-o", str(out_dir), str(dll_path)],
+            capture_output=True, text=True, timeout=300,
         )
         if r.returncode == 0:
             cs_count = len(list(out_dir.rglob("*.cs")))
             return {"success": True, "output_dir": str(out_dir), "cs_file_count": cs_count}
         return {"success": False, "error": r.stderr}
-    except FileNotFoundError:
-        return {"success": False, "error": "ilspycmd not found — install with: dotnet tool install -g ilspycmd"}
     except subprocess.TimeoutExpired:
         return {"success": False, "error": "Decompilation timed out (5 min limit)"}
 

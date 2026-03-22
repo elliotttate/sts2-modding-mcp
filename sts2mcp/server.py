@@ -4010,9 +4010,15 @@ def _launch_game(remote_debug: bool = False, renderer: str | None = None, extra_
 
 
 async def _decompile_game() -> dict:
+    from .setup import _find_ilspycmd
+
     dll_path = Path(GAME_DIR) / "data_sts2_windows_x86_64" / "sts2.dll"
     if not dll_path.exists():
         return {"success": False, "error": f"sts2.dll not found at {dll_path}"}
+
+    exe = _find_ilspycmd()
+    if not exe:
+        return {"success": False, "error": "ilspycmd not found. Install: dotnet tool install -g ilspycmd"}
 
     output_dir = Path(DECOMPILED_DIR)
     # Clear existing
@@ -4023,11 +4029,10 @@ async def _decompile_game() -> dict:
 
     try:
         result = subprocess.run(
-            ["ilspycmd", "-p", "-o", str(output_dir), str(dll_path)],
+            [exe, "-p", "-o", str(output_dir), str(dll_path)],
             capture_output=True,
             text=True,
             timeout=300,
-            env={**os.environ, "PATH": os.environ.get("PATH", "") + os.pathsep + os.path.expanduser("~/.dotnet/tools")},
         )
         if result.returncode == 0:
             # Reset index
@@ -4039,8 +4044,6 @@ async def _decompile_game() -> dict:
             game_data.console_commands.clear()
             return {"success": True, "output_dir": str(output_dir), "message": "Decompilation complete. Index will rebuild on next query."}
         return {"success": False, "stderr": result.stderr}
-    except FileNotFoundError:
-        return {"success": False, "error": "ilspycmd not found. Install: dotnet tool install -g ilspycmd"}
     except subprocess.TimeoutExpired:
         return {"success": False, "error": "Decompilation timed out after 5 minutes"}
 
