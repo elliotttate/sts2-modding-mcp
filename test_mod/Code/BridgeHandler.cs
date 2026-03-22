@@ -24,7 +24,10 @@ using HarmonyLib;
 using MegaCrit.Sts2.Core.Nodes.Screens;
 using MegaCrit.Sts2.Core.Nodes.Screens.Map;
 using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
+using MegaCrit.Sts2.Core.Nodes.Screens.MainMenu;
 using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
+using Godot;
+using GodotEngine = Godot.Engine;
 
 namespace MCPTest;
 
@@ -111,6 +114,8 @@ public static class BridgeHandler
                 "autoslay_stop" => MainThreadDispatcher.Invoke(() => AutoSlayStop()),
                 "autoslay_status" => MainThreadDispatcher.Invoke(() => AutoSlayGetStatus()),
                 "autoslay_configure" => AutoSlayConfigure(root),
+                "navigate_menu" => MainThreadDispatcher.Invoke(() => NavigateMenu(root)),
+                "click_node" => MainThreadDispatcher.Invoke(() => ClickNode(root)),
                 _ => new { error = $"Unknown method: {method}" },
             };
 
@@ -2510,7 +2515,7 @@ public static class BridgeHandler
             if (string.IsNullOrWhiteSpace(savePath))
             {
                 var dir = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData),
                     "MCPTest", "screenshots");
                 Directory.CreateDirectory(dir);
                 savePath = Path.Combine(dir, $"screenshot_{DateTime.Now:yyyyMMdd_HHmmss}.png");
@@ -3569,6 +3574,250 @@ public static class BridgeHandler
                 note = "Config will be applied on next AutoSlay start",
                 current_game_config = currentConfig,
             };
+        }
+        catch (Exception ex) { return new { error = ex.Message }; }
+    }
+
+    // ─── Menu Navigation (works without window focus) ───────────────────────
+
+    private static object NavigateMenu(JsonElement root)
+    {
+        try
+        {
+            if (!root.TryGetProperty("params", out var p) || !p.TryGetProperty("target", out var targetProp))
+                return new { error = "navigate_menu requires params.target (continue, compendium, card_library, new_run, abandon, back)" };
+
+            var target = (targetProp.GetString() ?? "").Trim().ToLowerInvariant();
+
+            // Get NGame instance via reflection
+            var nGameType = Type.GetType("MegaCrit.Sts2.Core.Nodes.NGame, sts2");
+            var nGameInstance = nGameType?.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+            if (nGameInstance == null)
+                return new { error = "NGame.Instance not available" };
+
+            // Get the MainMenu from NGame
+            var mainMenuProp = nGameType!.GetProperty("MainMenu", BindingFlags.Public | BindingFlags.Instance);
+            var mainMenu = mainMenuProp?.GetValue(nGameInstance);
+
+            switch (target)
+            {
+                case "continue":
+                {
+                    if (mainMenu == null)
+                        return new { error = "Not on main menu" };
+
+                    // Call the private OnContinueButtonPressed method
+                    var method = mainMenu.GetType().GetMethod("OnContinueButtonPressed",
+                        BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (method == null)
+                    {
+                        // Try calling OnContinueButtonPressedAsync directly
+                        var asyncMethod = mainMenu.GetType().GetMethod("OnContinueButtonPressedAsync",
+                            BindingFlags.NonPublic | BindingFlags.Instance);
+                        if (asyncMethod == null)
+                            return new { error = "Could not find continue method on NMainMenu" };
+
+                        asyncMethod.Invoke(mainMenu, null);
+                        ModEntry.WriteLog("[navigate_menu] Invoked OnContinueButtonPressedAsync");
+                        return new { success = true, target, invoked = "OnContinueButtonPressedAsync" };
+                    }
+
+                    // OnContinueButtonPressed takes an NButton parameter — pass null
+                    method.Invoke(mainMenu, new object?[] { null });
+                    ModEntry.WriteLog("[navigate_menu] Invoked OnContinueButtonPressed");
+                    return new { success = true, target, invoked = "OnContinueButtonPressed" };
+                }
+
+                case "compendium":
+                {
+                    if (mainMenu == null)
+                        return new { error = "Not on main menu" };
+
+                    // Get SubmenuStack and push NCompendiumSubmenu
+                    var stackProp = mainMenu.GetType().GetProperty("SubmenuStack",
+                        BindingFlags.Public | BindingFlags.Instance);
+                    var stack = stackProp?.GetValue(mainMenu);
+                    if (stack == null)
+                        return new { error = "Could not access SubmenuStack" };
+
+                    var compType = Type.GetType("MegaCrit.Sts2.Core.Nodes.Screens.MainMenu.NCompendiumSubmenu, sts2");
+                    if (compType == null)
+                        return new { error = "Could not find NCompendiumSubmenu type" };
+
+                    var pushMethods = stack.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                        .Where(m => m.Name == "PushSubmenuType" && m.IsGenericMethod && m.GetParameters().Length == 0);
+                    var pushMethod = pushMethods.FirstOrDefault();
+                    if (pushMethod == null)
+                        return new { error = "Could not find PushSubmenuType method" };
+
+                    var genericPush = pushMethod.MakeGenericMethod(compType);
+                    genericPush.Invoke(stack, null);
+                    ModEntry.WriteLog("[navigate_menu] Pushed NCompendiumSubmenu");
+                    return new { success = true, target, invoked = "PushSubmenuType<NCompendiumSubmenu>" };
+                }
+
+                case "card_library":
+                {
+                    if (mainMenu == null)
+                        return new { error = "Not on main menu" };
+
+                    var stackProp = mainMenu.GetType().GetProperty("SubmenuStack",
+                        BindingFlags.Public | BindingFlags.Instance);
+                    var stack = stackProp?.GetValue(mainMenu);
+                    if (stack == null)
+                        return new { error = "Could not access SubmenuStack" };
+
+                    // Use PushSubmenuType<NCardLibrary>() — simpler, no ambiguity
+                    var cardLibType = Type.GetType("MegaCrit.Sts2.Core.Nodes.Screens.CardLibrary.NCardLibrary, sts2")
+                        ?? Type.GetType("MegaCrit.Sts2.Core.Nodes.Screens.MainMenu.NCardLibrary, sts2");
+                    if (cardLibType == null)
+                        return new { error = "Could not find NCardLibrary type" };
+
+                    // Find PushSubmenuType (generic method)
+                    var pushMethods = stack.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                        .Where(m => m.Name == "PushSubmenuType" && m.IsGenericMethod && m.GetParameters().Length == 0);
+                    var pushMethod = pushMethods.FirstOrDefault();
+                    if (pushMethod == null)
+                        return new { error = "Could not find PushSubmenuType method" };
+
+                    var genericPush = pushMethod.MakeGenericMethod(cardLibType);
+                    genericPush.Invoke(stack, null);
+                    ModEntry.WriteLog("[navigate_menu] PushSubmenuType<NCardLibrary>");
+                    return new { success = true, target, invoked = "PushSubmenuType<NCardLibrary>" };
+                }
+
+                case "new_run" or "new_game" or "singleplayer":
+                {
+                    if (mainMenu == null)
+                        return new { error = "Not on main menu" };
+
+                    // Call SingleplayerButtonPressed
+                    var method = mainMenu.GetType().GetMethod("SingleplayerButtonPressed",
+                        BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (method == null)
+                        return new { error = "Could not find SingleplayerButtonPressed" };
+
+                    method.Invoke(mainMenu, new object?[] { null });
+                    ModEntry.WriteLog("[navigate_menu] Invoked SingleplayerButtonPressed");
+                    return new { success = true, target, invoked = "SingleplayerButtonPressed" };
+                }
+
+                case "abandon":
+                {
+                    if (!RunManager.Instance.IsInProgress)
+                        return new { error = "No run in progress to abandon" };
+
+                    RunManager.Instance.Abandon();
+                    ModEntry.WriteLog("[navigate_menu] Abandoned run");
+                    return new { success = true, target, invoked = "Abandon" };
+                }
+
+                case "back":
+                {
+                    if (mainMenu == null)
+                        return new { error = "Not on main menu" };
+
+                    var stackProp = mainMenu.GetType().GetProperty("SubmenuStack",
+                        BindingFlags.Public | BindingFlags.Instance);
+                    var stack = stackProp?.GetValue(mainMenu);
+                    if (stack == null)
+                        return new { error = "Could not access SubmenuStack" };
+
+                    var popMethod = stack.GetType().GetMethod("Pop",
+                        BindingFlags.Public | BindingFlags.Instance);
+                    popMethod?.Invoke(stack, null);
+                    ModEntry.WriteLog("[navigate_menu] Popped submenu stack");
+                    return new { success = true, target, invoked = "Pop" };
+                }
+
+                case "proceed" or "continue_screen" or "dismiss":
+                {
+                    // Generic proceed — works on game over, death, reward, etc.
+                    var screenObj = GetActiveScreenObject();
+                    if (screenObj == null)
+                        return new { error = "No active screen object" };
+
+                    // Try common proceed/continue patterns
+                    if (TryInvokeMethod(screenObj, ["OpenSummaryScreen", "Proceed", "Continue", "Confirm", "Done", "Close", "Leave", "Accept", "Dismiss"], Array.Empty<object?>(), out var invokedMethod))
+                    {
+                        ModEntry.WriteLog($"[navigate_menu] proceed via {invokedMethod} on {screenObj.GetType().Name}");
+                        return new { success = true, target, invoked = invokedMethod, screen_type = screenObj.GetType().Name };
+                    }
+
+                    // Try finding and clicking a continue/proceed button
+                    if (screenObj is Godot.Node screenNode)
+                    {
+                        foreach (var btnName in new[] { "%ContinueButton", "%ProceedButton", "%DoneButton", "%CloseButton" })
+                        {
+                            var btn = screenNode.GetNodeOrNull(btnName);
+                            if (btn is BaseButton baseBtn)
+                            {
+                                baseBtn.EmitSignal("pressed");
+                                ModEntry.WriteLog($"[navigate_menu] proceed via button {btnName}");
+                                return new { success = true, target, invoked = $"button:{btnName}" };
+                            }
+                            if (btn is NClickableControl clickable)
+                            {
+                                clickable.EmitSignal("Released", (NButton?)null);
+                                ModEntry.WriteLog($"[navigate_menu] proceed via NClickableControl {btnName}");
+                                return new { success = true, target, invoked = $"Released:{btnName}" };
+                            }
+                        }
+                    }
+
+                    return new { error = $"Could not proceed on {screenObj.GetType().Name}" };
+                }
+
+                default:
+                    return new { error = $"Unknown target: {target}. Valid: continue, compendium, card_library, new_run, abandon, back, proceed" };
+            }
+        }
+        catch (Exception ex) { return new { error = ex.Message }; }
+    }
+
+    private static object ClickNode(JsonElement root)
+    {
+        try
+        {
+            if (!root.TryGetProperty("params", out var p) || !p.TryGetProperty("path", out var pathProp))
+                return new { error = "click_node requires params.path (Godot node path)" };
+
+            var path = pathProp.GetString() ?? "";
+
+            var tree = GodotEngine.GetMainLoop() as SceneTree;
+            if (tree?.Root == null)
+                return new { error = "SceneTree not available" };
+
+            var node = tree.Root.GetNodeOrNull(path);
+            if (node == null)
+                return new { error = $"Node not found: {path}" };
+
+            // Try emitting pressed signal (for BaseButton subclasses)
+            if (node is BaseButton button)
+            {
+                button.EmitSignal("pressed");
+                ModEntry.WriteLog($"[click_node] Emitted 'pressed' on BaseButton at {path}");
+                return new { success = true, path, node_type = node.GetType().Name, method = "EmitSignal(pressed)" };
+            }
+
+            // Try calling Pressed, OnPressed, etc.
+            if (TryInvokeMethod(node, ["Pressed", "OnPressed", "_Pressed", "OnClicked", "Click"], Array.Empty<object?>(), out var invokedMethod))
+            {
+                ModEntry.WriteLog($"[click_node] Invoked {invokedMethod} on {path}");
+                return new { success = true, path, node_type = node.GetType().Name, method = invokedMethod };
+            }
+
+            // Try GrabFocus + accept event
+            if (node is Control control)
+            {
+                control.GrabFocus();
+                var acceptEvent = new InputEventAction { Action = "ui_accept", Pressed = true };
+                control.EmitSignal(Control.SignalName.GuiInput, acceptEvent);
+                ModEntry.WriteLog($"[click_node] Sent ui_accept to control at {path}");
+                return new { success = true, path, node_type = node.GetType().Name, method = "ui_accept" };
+            }
+
+            return new { error = $"Don't know how to click {node.GetType().Name} at {path}" };
         }
         catch (Exception ex) { return new { error = ex.Message }; }
     }

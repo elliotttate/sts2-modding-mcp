@@ -1581,6 +1581,40 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="bridge_navigate_menu",
+            description=(
+                "Navigate the main menu programmatically. Works even when the game window is not focused. "
+                "Targets: 'continue' (resume saved run), 'compendium' (open compendium submenu), "
+                "'card_library' (open card library directly), 'new_run' (open character select), "
+                "'abandon' (abandon current run), 'back' (pop current submenu)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "enum": ["continue", "compendium", "card_library", "new_run", "abandon", "back"],
+                        "description": "Menu target to navigate to",
+                    },
+                },
+                "required": ["target"],
+            },
+        ),
+        types.Tool(
+            name="bridge_click_node",
+            description=(
+                "Click a Godot UI node by its scene tree path. Works without window focus. "
+                "Emits 'pressed' signal for buttons, or invokes click-like methods."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Godot node path (e.g. '/root/NGame/MainMenu/ContinueButton')"},
+                },
+                "required": ["path"],
+            },
+        ),
+        types.Tool(
             name="bridge_rest_site_choice",
             description=(
                 "Make a choice at a rest site. Options: 'rest' (heal), 'smith' (upgrade card), 'recall'."
@@ -3472,6 +3506,14 @@ async def _handle_tool(name: str, args: dict):
     elif name == "bridge_make_event_choice":
         from . import bridge_client
         return await _call_bridge(bridge_client.make_event_choice, args["choice_index"])
+
+    elif name == "bridge_navigate_menu":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.navigate_menu, args["target"])
+
+    elif name == "bridge_click_node":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.click_node, args["path"])
 
     elif name == "bridge_navigate_map":
         from . import bridge_client

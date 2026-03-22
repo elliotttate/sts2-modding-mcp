@@ -1,0 +1,11 @@
+{
+  "id": "foilcards",
+  "pck_name": "FoilCards",
+  "name": "Foil Cards",
+  "author": "elliotttate",
+  "description": "Adds a holographic foil shader to all cards that catches the light as you mouse over them.",
+  "version": "1.0.0",
+  "has_pck": false,
+  "has_dll": true,
+  "affects_gameplay": false
+}

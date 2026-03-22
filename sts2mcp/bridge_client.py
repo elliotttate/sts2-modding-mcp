@@ -508,6 +508,27 @@ def restart_run() -> dict:
     return send_request("restart_run")
 
 
+# ─── Menu Navigation (works without window focus) ────────────────────────────
+
+
+def navigate_menu(target: str) -> dict:
+    """Navigate main menu programmatically. Works even when game isn't focused.
+
+    Args:
+        target: "continue" | "compendium" | "card_library" | "new_run" | "abandon" | "back"
+    """
+    return send_request("navigate_menu", {"target": target})
+
+
+def click_node(path: str) -> dict:
+    """Click a Godot node by its scene tree path. Works without window focus.
+
+    Args:
+        path: Godot node path (e.g. "/root/NGame/MainMenu/ContinueButton")
+    """
+    return send_request("click_node", {"path": path})
+
+
 # ─── Breakpoints & Stepping ───────────────────────────────────────────────────
 
 
