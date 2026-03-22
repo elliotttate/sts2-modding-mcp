@@ -34,8 +34,8 @@ def _find_gdre() -> str:
         return found
     raise FileNotFoundError(
         f"gdre_tools not found at {GDRE_TOOLS_PATH} or on PATH. "
-        "Download from https://github.com/GDRETools/gdsdecomp/releases — "
-        "extract and set GDRE_TOOLS_PATH env var or place in tools/ directory."
+        "Run 'python -m sts2mcp.setup' to download automatically, or get it from "
+        "https://github.com/GDRETools/gdsdecomp/releases"
     )
 
 

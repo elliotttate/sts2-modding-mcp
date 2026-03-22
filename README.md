@@ -1,6 +1,6 @@
 # STS2 Modding MCP
 
-A comprehensive [Model Context Protocol](https://modelcontextprotocol.io/) server for **Slay the Spire 2** modding. Reverse-engineers the game's C# assemblies and Godot PCK assets, providing **150 MCP tools** for querying game data, generating mod code, applying it into real projects, building/deploying mods, and driving in-game playtests from AI assistants like Claude Code.
+A comprehensive [Model Context Protocol](https://modelcontextprotocol.io/) server for **Slay the Spire 2** modding. Reverse-engineers the game's C# assemblies and Godot PCK assets, providing **151 MCP tools** for querying game data, generating mod code, applying it into real projects, building/deploying mods, and driving in-game playtests from AI assistants like Claude Code.
 
 > **New in v3.1:** Roslyn-based C# code analysis replaces regex parsing — 3,048 classes with full syntax trees, 18,279 methods with call graphs, 135 enums, inverted indexes for O(1) type/override/invocation lookups, and a new `suggest_hooks` tool for intent-based hook recommendations.
 
@@ -20,7 +20,7 @@ At the library level, `sts2mcp.mod_gen.ModGenerator` also now includes project-a
 
 ## Tool Highlights
 
-The MCP currently exposes 150 tools. The sections below highlight the main workflows and the newer complex-mod helpers rather than exhaustively listing every advanced scaffold one by one.
+The MCP currently exposes 151 tools. The sections below highlight the main workflows and the newer complex-mod helpers rather than exhaustively listing every advanced scaffold one by one.
 
 ### Game Data Query
 
@@ -301,19 +301,18 @@ The `get_modding_guide` tool provides built-in documentation. The 12 new topics 
 
 ## Quick Start
 
-If you just want to get running fast:
-
 ```bash
 git clone https://github.com/elliotttate/sts2-modding-mcp.git
 cd sts2-modding-mcp
 python -m venv venv
 venv\Scripts\activate.bat        # Windows cmd  (PowerShell: venv\Scripts\Activate.ps1)
 pip install .
-dotnet tool install -g ilspycmd
-ilspycmd -p -o ./decompiled "<your Steam path>\steamapps\common\Slay the Spire 2\data_sts2_windows_x86_64\sts2.dll"
+python -m sts2mcp.setup          # auto-finds game, installs tools, decompiles
 ```
 
 Then add the MCP server to your AI tool's config (see [step 5](#5-connect-to-an-ai-assistant) below) and restart it.
+
+The setup wizard automatically finds your Steam install, installs `ilspycmd` if needed, decompiles the game source, and optionally downloads GDRE Tools for asset extraction.
 
 ## Setup
 
@@ -343,7 +342,7 @@ pip install .
 
 ### 2. Decompile the game (C#)
 
-> **Note:** The server will start without this step, but most tools (entity queries, code search, hook lookups) will fail until the decompiled source exists. You can also do this step after connecting to an AI by using the `decompile_game` tool.
+> **Note:** If you ran `python -m sts2mcp.setup` above, this step was already done for you. The steps below are for manual setup or troubleshooting.
 
 Decompile `sts2.dll` to populate the `decompiled/` directory:
 
@@ -357,7 +356,9 @@ Common Steam library locations:
 
 You can find your exact path by right-clicking the game in Steam → Manage → Browse Local Files.
 
-### 3. Set up GDRE Tools (Godot assets)
+### 3. Set up GDRE Tools (Godot assets — optional)
+
+> **Note:** `python -m sts2mcp.setup` can download this automatically. GDRE Tools are only needed for Godot asset extraction tools, not for core modding.
 
 Download the latest [GDRE Tools release](https://github.com/GDRETools/gdsdecomp/releases) and extract it to the `tools/` directory:
 
@@ -521,7 +522,7 @@ sts2-modding-mcp/
 ├── requirements.txt        # Dependencies
 ├── sts2mcp/
 │   ├── __init__.py
-│   ├── server.py           # MCP server with all 150 tool definitions
+│   ├── server.py           # MCP server with all 151 tool definitions
 │   ├── game_data.py        # Game data indexing and querying
 │   ├── mod_gen.py          # Code generation templates plus project-aware workflow helpers
 │   ├── pck_builder.py      # Pure Python Godot PCK builder

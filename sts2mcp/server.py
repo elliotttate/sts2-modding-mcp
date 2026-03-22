@@ -38,14 +38,9 @@ def _get_image_gen():
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-GAME_DIR = os.environ.get(
-    "STS2_GAME_DIR",
-    r"E:\SteamLibrary\steamapps\common\Slay the Spire 2",
-)
-DECOMPILED_DIR = os.environ.get(
-    "STS2_DECOMPILED_DIR",
-    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "decompiled"),
-)
+from .setup import resolve_config, auto_detect_on_startup, get_setup_status as _get_setup_status
+
+GAME_DIR, DECOMPILED_DIR = resolve_config()
 
 # ─── Initialize ───────────────────────────────────────────────────────────────
 
@@ -168,6 +163,14 @@ async def list_tools() -> list[types.Tool]:
             description=(
                 "Get overview of the game: version, file paths, entity counts, available namespaces, "
                 "and the modding API surface. Good starting point for understanding the game."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="get_setup_status",
+            description=(
+                "Check the server setup status: whether the game was found, .NET/ilspycmd are installed, "
+                "source is decompiled, GDRE tools are available. Use this to diagnose setup issues."
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
@@ -2928,6 +2931,9 @@ async def _handle_tool(name: str, args: dict):
             "modding_libraries": ["Harmony 2.4.2", "MonoMod"],
         }
 
+    elif name == "get_setup_status":
+        return _get_setup_status(GAME_DIR, DECOMPILED_DIR)
+
     elif name == "get_console_commands":
         return game_data.get_console_commands()
 
@@ -4042,6 +4048,9 @@ async def _decompile_game() -> dict:
 # ─── Entry Point ─────────────────────────────────────────────────────────────
 
 async def main():
+    # Auto-detect game path on first run (writes to stderr only, no MCP interference)
+    auto_detect_on_startup()
+
     async with stdio_server() as (read_stream, write_stream):
         await server.run(
             read_stream,

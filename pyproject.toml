@@ -16,6 +16,9 @@ images = [
 ]
 test = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 
+[project.scripts]
+sts2mcp-setup = "sts2mcp.setup:cli_main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
