@@ -293,10 +293,10 @@ The `get_modding_guide` tool provides built-in documentation. The 12 new topics 
 
 ## Prerequisites
 
-- **Python 3.11+**
+- **[Python 3.11+](https://www.python.org/downloads/)** — check with `python --version`
+- **[.NET SDK 9.0](https://dotnet.microsoft.com/download/dotnet/9.0)** — for building mods, the Roslyn code analyzer, and decompilation
 - **[ilspycmd](https://www.nuget.org/packages/ilspycmd/)** — `dotnet tool install -g ilspycmd` (for C# decompilation)
 - **[GDRE Tools](https://github.com/GDRETools/gdsdecomp/releases)** — download the latest release and extract to `tools/` or set `GDRE_TOOLS_PATH` (for Godot asset extraction)
-- **.NET SDK 9.0** — for building mods and the Roslyn code analyzer (auto-built on first run)
 - **Slay the Spire 2** — the game itself
 
 ## Setup
@@ -327,13 +327,13 @@ pip install .
 
 ### 2. Decompile the game (C#)
 
-The first time, you need to decompile `sts2.dll` to populate the `decompiled/` directory:
+> **Note:** The server will start without this step, but most tools (entity queries, code search, hook lookups) will fail until the decompiled source exists. You can also do this step after connecting to an AI by using the `decompile_game` tool.
+
+Decompile `sts2.dll` to populate the `decompiled/` directory:
 
 ```bash
 ilspycmd -p -o ./decompiled "E:\SteamLibrary\steamapps\common\Slay the Spire 2\data_sts2_windows_x86_64\sts2.dll"
 ```
-
-Or use the `decompile_game` tool after connecting the MCP.
 
 ### 3. Set up GDRE Tools (Godot assets)
 
@@ -384,6 +384,19 @@ Add the following (create the file if it doesn't exist):
     "sts2-modding": {
       "command": "/path/to/sts2-modding-mcp/venv/Scripts/python.exe",
       "args": ["/path/to/sts2-modding-mcp/run.py"]
+    }
+  }
+}
+```
+
+For example, if you cloned to `C:\Users\YourName\sts2-modding-mcp`:
+
+```json
+{
+  "mcpServers": {
+    "sts2-modding": {
+      "command": "C:\\Users\\YourName\\sts2-modding-mcp\\venv\\Scripts\\python.exe",
+      "args": ["C:\\Users\\YourName\\sts2-modding-mcp\\run.py"]
     }
   }
 }

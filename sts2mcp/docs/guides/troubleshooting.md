@@ -22,7 +22,7 @@ Install .NET SDK 9.0 from https://dotnet.microsoft.com/download
 
 ### Server won't start or connect
 1. Check Python version: `python --version` (needs 3.11+)
-2. Check mcp is installed: `pip install "mcp[cli]"`
+2. Check dependencies are installed: `pip install .` (from the project root)
 3. Test directly: `python run.py` — should start without errors
 4. Check your `.mcp.json` or `settings.json` path is correct (use forward slashes)
 

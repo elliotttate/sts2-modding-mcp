@@ -20,6 +20,9 @@ test = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.targets.wheel]
+packages = ["sts2mcp"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
