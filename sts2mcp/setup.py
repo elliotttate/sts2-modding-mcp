@@ -425,13 +425,70 @@ def _ask(prompt: str, default: bool = True) -> bool:
         return False
 
 
+def _check_python_version() -> None:
+    """Warn early if Python version is too old."""
+    if sys.version_info < (3, 11):
+        print(
+            f"  WARNING: Python {sys.version_info.major}.{sys.version_info.minor} detected, "
+            "but 3.11+ is required. Some features may not work.",
+            file=sys.stderr,
+        )
+
+
+def build_roslyn_index(decompiled_dir: str) -> dict:
+    """Build the Roslyn analyzer and generate the index. Returns success/failure."""
+    if not shutil.which("dotnet"):
+        return {"success": False, "error": "dotnet not found"}
+
+    analyzer_dir = PROJECT_ROOT / "tools" / "roslyn_analyzer"
+    if not (analyzer_dir / "RoslynAnalyzer.csproj").exists():
+        return {"success": False, "error": "Roslyn analyzer source not found"}
+
+    dll_path = analyzer_dir / "bin" / "Release" / "net9.0" / "RoslynAnalyzer.dll"
+    index_path = Path(decompiled_dir) / "roslyn_index.json"
+
+    # Build the analyzer if DLL doesn't exist
+    if not dll_path.exists():
+        nuget_config = analyzer_dir / "nuget.config"
+        restore_cmd = ["dotnet", "restore"]
+        if nuget_config.exists():
+            restore_cmd += ["--configfile", str(nuget_config)]
+        try:
+            r = subprocess.run(restore_cmd, cwd=str(analyzer_dir), capture_output=True, text=True, timeout=120)
+            if r.returncode != 0:
+                return {"success": False, "error": f"restore failed: {r.stderr[:200]}"}
+            r = subprocess.run(
+                ["dotnet", "build", "-c", "Release", "--no-restore"],
+                cwd=str(analyzer_dir), capture_output=True, text=True, timeout=120,
+            )
+            if r.returncode != 0:
+                return {"success": False, "error": f"build failed: {r.stderr[:200]}"}
+        except (subprocess.TimeoutExpired, OSError) as e:
+            return {"success": False, "error": str(e)}
+
+    # Run the analyzer
+    try:
+        r = subprocess.run(
+            ["dotnet", str(dll_path), decompiled_dir, str(index_path)],
+            capture_output=True, text=True, timeout=300,
+        )
+        if r.returncode == 0 and index_path.exists():
+            size_mb = index_path.stat().st_size / (1024 * 1024)
+            return {"success": True, "index_path": str(index_path), "size_mb": round(size_mb, 1)}
+        return {"success": False, "error": r.stderr[:200] if r.stderr else "unknown error"}
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return {"success": False, "error": str(e)}
+
+
 def run_full_setup(interactive: bool = True) -> dict:
-    """Run the complete setup flow. Interactive mode prompts before expensive operations."""
+    """Run the complete setup flow. Non-interactive mode performs all actions without prompting."""
     results: dict = {}
     config = load_config()
 
+    _check_python_version()
+
     # ── Step 1: Find game ──
-    print("\n[1/5] Finding game installation...", file=sys.stderr)
+    print("\n[1/6] Finding game installation...", file=sys.stderr)
     game_dir = os.environ.get("STS2_GAME_DIR") or config.get("game_dir")
     if game_dir and os.path.isdir(game_dir):
         dll = os.path.join(game_dir, "data_sts2_windows_x86_64", "sts2.dll")
@@ -461,7 +518,7 @@ def run_full_setup(interactive: bool = True) -> dict:
     results["game_found"] = game_dir is not None
 
     # ── Step 2: Check .NET SDK ──
-    print("\n[2/5] Checking .NET SDK...", file=sys.stderr)
+    print("\n[2/6] Checking .NET SDK...", file=sys.stderr)
     dotnet = check_dotnet()
     if dotnet["installed"]:
         print(f"  dotnet {dotnet['version']}: OK", file=sys.stderr)
@@ -470,7 +527,7 @@ def run_full_setup(interactive: bool = True) -> dict:
     results["dotnet"] = dotnet
 
     # ── Step 3: Check/install ilspycmd ──
-    print("\n[3/5] Checking ilspycmd...", file=sys.stderr)
+    print("\n[3/6] Checking ilspycmd...", file=sys.stderr)
     ilspy = check_ilspycmd()
     if ilspy["installed"]:
         print(f"  ilspycmd: OK", file=sys.stderr)
@@ -489,13 +546,11 @@ def run_full_setup(interactive: bool = True) -> dict:
     results["ilspycmd"] = ilspy
 
     # ── Step 4: Decompile game ──
-    print("\n[4/5] Checking decompiled source...", file=sys.stderr)
+    print("\n[4/6] Checking decompiled source...", file=sys.stderr)
     decompiled_dir = config.get("decompiled_dir") or str(DECOMPILED_DIR_DEFAULT)
     decomp = check_decompiled(decompiled_dir)
     if decomp["exists"] and decomp["cs_file_count"] > 0:
         print(f"  {decomp['cs_file_count']} C# files found: OK", file=sys.stderr)
-        if decomp["has_roslyn_index"]:
-            print("  Roslyn index: OK", file=sys.stderr)
     elif game_dir and ilspy["installed"]:
         print("  Not found.", file=sys.stderr)
         if not interactive or _ask("  Decompile game now? (takes ~30 seconds)"):
@@ -516,13 +571,13 @@ def run_full_setup(interactive: bool = True) -> dict:
     results["decompiled"] = decomp
 
     # ── Step 5: GDRE Tools ──
-    print("\n[5/5] Checking GDRE Tools...", file=sys.stderr)
+    print("\n[5/6] Checking GDRE Tools...", file=sys.stderr)
     gdre = check_gdre_tools()
     if gdre["installed"]:
         print(f"  Found: {gdre['path']}", file=sys.stderr)
     else:
         print("  Not found (optional — needed for Godot asset extraction).", file=sys.stderr)
-        if interactive and _ask("  Download latest release?"):
+        if not interactive or _ask("  Download latest release?"):
             dl_result = download_gdre_tools()
             if dl_result["success"]:
                 print(f"  Installed: {dl_result['path']}", file=sys.stderr)
@@ -530,6 +585,26 @@ def run_full_setup(interactive: bool = True) -> dict:
             else:
                 print(f"  Failed: {dl_result['error']}", file=sys.stderr)
     results["gdre_tools"] = gdre
+
+    # ── Step 6: Roslyn index ──
+    print("\n[6/6] Checking Roslyn code index...", file=sys.stderr)
+    if decomp["exists"] and decomp["cs_file_count"] > 0:
+        if decomp["has_roslyn_index"]:
+            print("  Roslyn index: OK", file=sys.stderr)
+        elif dotnet["installed"]:
+            print("  Not found. Building Roslyn analyzer and generating index...", file=sys.stderr)
+            roslyn_result = build_roslyn_index(decompiled_dir)
+            if roslyn_result["success"]:
+                print(f"  Done ({roslyn_result['size_mb']}MB index)", file=sys.stderr)
+                decomp = check_decompiled(decompiled_dir)
+            else:
+                print(f"  Failed: {roslyn_result['error']}", file=sys.stderr)
+                print("  (The server will fall back to regex parsing — this is OK)", file=sys.stderr)
+        else:
+            print("  Skipped (requires .NET SDK)", file=sys.stderr)
+    else:
+        print("  Skipped (no decompiled source)", file=sys.stderr)
+    results["decompiled"] = decomp
 
     # ── Save config ──
     if config.get("game_dir"):
