@@ -23,7 +23,33 @@ from urllib import request, error as urlerror
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+def _find_project_root() -> Path:
+    """Find the sts2-modding-mcp repo root.
+
+    Checks (in order): parent of __file__ (source checkout), then cwd, then
+    walks up from cwd looking for run.py + sts2mcp/ as markers.
+    """
+    # 1. Source checkout: __file__ is sts2mcp/setup.py, parent.parent is repo root
+    candidate = Path(__file__).resolve().parent.parent
+    if (candidate / "run.py").exists() and (candidate / "sts2mcp").is_dir():
+        return candidate
+
+    # 2. Current working directory (user ran `python -m sts2mcp.setup` from repo)
+    cwd = Path.cwd()
+    if (cwd / "run.py").exists() and (cwd / "sts2mcp").is_dir():
+        return cwd
+
+    # 3. Walk up from cwd
+    for parent in cwd.parents:
+        if (parent / "run.py").exists() and (parent / "sts2mcp").is_dir():
+            return parent
+
+    # Fallback to cwd (best effort)
+    return cwd
+
+
+PROJECT_ROOT = _find_project_root()
 CONFIG_PATH = PROJECT_ROOT / "sts2mcp_config.json"
 TOOLS_DIR = PROJECT_ROOT / "tools"
 DECOMPILED_DIR_DEFAULT = PROJECT_ROOT / "decompiled"
