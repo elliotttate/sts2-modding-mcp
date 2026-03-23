@@ -4059,28 +4059,23 @@ public static class BridgeHandler
                 if (body != null)
                 {
                     float angleRad = _autoRotateAngle * Mathf.Pi / 180.0f;
-                    float tiltX = Mathf.Sin(angleRad) * 0.4f; // tilt parameter for vertex shader
+                    float cosA = Mathf.Cos(angleRad);
+                    float sinA = Mathf.Sin(angleRad);
 
-                    // Apply vertex shader to CardContainer if not already set
-                    if (_tiltShader == null)
-                    {
-                        _tiltShader = new Shader();
-                        _tiltShader.Code = TiltShaderCode;
-                    }
+                    // Use Transform2D to create a perspective-like effect
+                    // The key: modify the CanvasItem's transform to simulate
+                    // Y-axis rotation, similar to how STS1 mod modifies the
+                    // projection matrix before card rendering.
+                    //
+                    // Transform2D columns: X basis, Y basis, Origin
+                    // For Y-axis rotation: compress X, add skew for perspective
+                    var center = new Vector2(150, 211);
+                    body.PivotOffset = center;
 
-                    var mat = body.Material as ShaderMaterial;
-                    if (mat == null || mat.Shader != _tiltShader)
-                    {
-                        mat = new ShaderMaterial();
-                        mat.Shader = _tiltShader;
-                        body.Material = mat;
-
-                        // Set UseParentMaterial on visual children only
-                        SetUseParentOnChildren(body);
-                    }
-
-                    mat.SetShaderParameter("tilt_x", tiltX);
-                    mat.SetShaderParameter("tilt_y", 0f);
+                    // Scale X by cos(angle) for the foreshortening
+                    // Skew by sin(angle) for the perspective trapezoid
+                    body.Scale = new Vector2(cosA, 1.0f);
+                    body.Set("skew", sinA * 0.12f);
                 }
             }
             catch { }
