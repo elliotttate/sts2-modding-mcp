@@ -230,6 +230,16 @@ def _resolve_project_context(project_dir: str | Path) -> ProjectContext:
         warnings.append(
             f"Manifest pck_name '{manifest['pck_name']}' differs from resource root '{resource_root_name}'"
         )
+    # Godot's virtual filesystem is case-sensitive. The game's ModManager looks
+    # for localization at res://{manifest.id}/localization/... so the PCK's
+    # base_prefix (derived from pck_name) must match the manifest id exactly.
+    mod_id = manifest.get("id", "")
+    if mod_id and pck_name and mod_id != pck_name:
+        warnings.append(
+            f"PCK base_prefix '{pck_name}' does not match manifest id '{mod_id}'. "
+            f"Godot's res:// paths are case-sensitive — localization files in the PCK "
+            f"will not be found by the game. Set pck_name to '{mod_id}' in the manifest."
+        )
 
     return ProjectContext(
         project_dir=project,

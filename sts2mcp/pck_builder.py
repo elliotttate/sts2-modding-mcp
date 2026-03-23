@@ -205,6 +205,14 @@ def build_pck(
     stats["total_files"] = len(entries)
 
     # Write PCK file
+    #
+    # Godot PCK v2 layout (must follow this order):
+    #   [header 96 bytes] [directory] [file data]
+    #
+    # Godot reads the directory immediately after the header, then uses
+    # file_base + offset to locate each file's data.  Putting file data
+    # before the directory causes Godot to misread the directory and
+    # silently register zero files.
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -219,6 +227,22 @@ def build_pck(
         f.write(struct.pack('<Q', 0))  # file_base (will update)
         f.write(b'\x00' * 64)  # 16 reserved uint32s
 
+        # ─── Directory (written first — Godot reads it right after header) ───
+        f.write(struct.pack('<I', len(entries)))
+
+        # Pre-encode paths so we can compute directory size
+        encoded_paths = [_encode_path(e.pck_path) for e in entries]
+        # Write placeholder directory entries (offsets filled in second pass)
+        dir_entry_positions: list[int] = []
+        for i, entry in enumerate(entries):
+            dir_entry_positions.append(f.tell())
+            f.write(struct.pack('<I', len(encoded_paths[i])))
+            f.write(encoded_paths[i])
+            f.write(struct.pack('<Q', 0))  # offset placeholder
+            f.write(struct.pack('<Q', len(entry.data)))  # size
+            f.write(entry.md5)  # 16 bytes MD5
+            f.write(struct.pack('<I', 0))  # flags
+
         # ─── File data ───
         _pad_to_alignment(f, PCK_ALIGNMENT)
         file_base = f.tell()
@@ -229,20 +253,15 @@ def build_pck(
             f.write(entry.data)
             stats["total_bytes"] += len(entry.data)
 
-        # ─── Directory ───
-        _pad_to_alignment(f, PCK_ALIGNMENT)
-        f.write(struct.pack('<I', len(entries)))
+        # ─── Patch directory offsets and file_base ───
+        for i, entry in enumerate(entries):
+            # Seek to the offset field in this directory entry
+            # Layout per entry: path_len(4) + path(var) + offset(8) + size(8) + md5(16) + flags(4)
+            offset_field_pos = dir_entry_positions[i] + 4 + len(encoded_paths[i])
+            f.seek(offset_field_pos)
+            f.write(struct.pack('<Q', entry.offset))
 
-        for entry in entries:
-            path_bytes = _encode_path(entry.pck_path)
-            f.write(struct.pack('<I', len(path_bytes)))
-            f.write(path_bytes)
-            f.write(struct.pack('<Q', entry.offset))  # offset (relative to file_base)
-            f.write(struct.pack('<Q', len(entry.data)))  # size
-            f.write(entry.md5)  # 16 bytes MD5
-            f.write(struct.pack('<I', 0))  # flags
-
-        # ─── Update file_base in header ───
+        # Update file_base in header
         f.seek(24)
         f.write(struct.pack('<Q', file_base))
 
@@ -277,41 +296,7 @@ def list_pck_contents(pck_path: str) -> dict:
             f.seek(dir_offset)
         else:
             f.read(64)  # reserved
-            # For format v2, directory is after all file data.
-            # We wrote it right after the last file data block (aligned).
-            # Scan from file_base forward: read file data entries to find directory.
-            # Simpler approach: the directory starts after all data. We can find it
-            # by seeking from the end of the file backwards, or by knowing our layout.
-            # Our layout: [header 96][pad][file data...][pad][directory]
-            # The directory has file_count as first uint32. We need to find it.
-            # Strategy: seek to end - try reading the last portion as directory.
-            # Actually, just scan from after header+file_base area.
-            # For files we wrote, we know the pattern. Let's try scanning for the directory.
-            # Skip to just past the file_base offset by scanning each file.
-            # Easiest: the PCK we create puts directory right after data, so seek
-            # past all aligned data blocks. We'll just try sequential scan.
-            # For robustness, scan backwards from EOF for a valid file_count.
-            f.seek(0, 2)
-            eof = f.tell()
-            # Try positions from file_base forward, aligned
-            pos = file_base
-            found = False
-            while pos < eof - 4:
-                f.seek(pos)
-                candidate = struct.unpack('<I', f.read(4))[0]
-                if 0 < candidate < 100000:  # reasonable file count
-                    # Try to validate by reading first entry
-                    try:
-                        path_len = struct.unpack('<I', f.read(4))[0]
-                        if 0 < path_len < 4096:
-                            f.seek(pos)
-                            found = True
-                            break
-                    except (struct.error, IOError):
-                        pass
-                pos += PCK_ALIGNMENT
-            if not found:
-                return {"error": "Could not locate directory in PCK"}
+            # PCK v2: directory is right after the header (Godot reads it here)
 
         file_count = struct.unpack('<I', f.read(4))[0]
         files = []
