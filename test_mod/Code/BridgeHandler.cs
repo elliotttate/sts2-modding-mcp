@@ -117,6 +117,8 @@ public static class BridgeHandler
                 "navigate_menu" => MainThreadDispatcher.Invoke(() => NavigateMenu(root)),
                 "find_cards" => MainThreadDispatcher.Invoke(() => FindCards(root)),
                 "card_tilt_test" => MainThreadDispatcher.Invoke(() => CardTiltTest(root)),
+                "start_auto_rotate" => MainThreadDispatcher.Invoke(() => StartAutoRotate()),
+                "stop_auto_rotate" => MainThreadDispatcher.Invoke(() => StopAutoRotate()),
                 "start_card_tilt_loop" => StartCardTiltLoop(),
                 "stop_card_tilt_loop" => StopCardTiltLoop(),
                 "start_foil_tilt" => MainThreadDispatcher.Invoke(() => StartFoilTilt()),
@@ -3981,6 +3983,114 @@ public static class BridgeHandler
         {
             try { FindCardsRecursive(node.GetChild(i), results, ref totalNodes, doRotate, rotation); }
             catch { }
+        }
+    }
+
+    // ─── Auto-Rotate ─────────────────────────────────────────────────────
+
+    private static bool _autoRotate = false;
+    private static float _autoRotateAngle = 0f;
+    private static float _autoRotateSpeed = 2f; // degrees per tick
+
+    private static object StartAutoRotate()
+    {
+        _autoRotate = true;
+        _autoRotateAngle = 0f;
+        ModEntry.WriteLog("[AutoRotate] Started");
+
+        // Start a background task that calls FindCards repeatedly
+        System.Threading.Tasks.Task.Run(async () =>
+        {
+            var emptyJson = System.Text.Json.JsonDocument.Parse("{\"params\":{}}").RootElement;
+            while (_autoRotate)
+            {
+                try
+                {
+                    // Increment angle
+                    _autoRotateAngle = (_autoRotateAngle + _autoRotateSpeed) % 360f;
+
+                    // Apply rotation via MainThreadDispatcher.Post (fire-and-forget)
+                    MainThreadDispatcher.Post(() =>
+                    {
+                        try
+                        {
+                            var tree = GodotEngine.GetMainLoop() as SceneTree;
+                            if (tree?.Root == null) return;
+                            AutoRotateCards(tree.Root);
+                        }
+                        catch { }
+                    });
+                }
+                catch { }
+                await System.Threading.Tasks.Task.Delay(33); // ~30fps
+            }
+            ModEntry.WriteLog("[AutoRotate] Stopped");
+        });
+
+        return new { success = true, status = "started" };
+    }
+
+    private static object StopAutoRotate()
+    {
+        _autoRotate = false;
+
+        // Reset all cards to normal
+        MainThreadDispatcher.Post(() =>
+        {
+            try
+            {
+                var tree = GodotEngine.GetMainLoop() as SceneTree;
+                if (tree?.Root == null) return;
+                ResetCardScale(tree.Root);
+            }
+            catch { }
+        });
+
+        return new { success = true, status = "stopped" };
+    }
+
+    private static void AutoRotateCards(Node node)
+    {
+        if (node is MegaCrit.Sts2.Core.Nodes.Cards.NCard && node is Control ctrl)
+        {
+            try
+            {
+                var body = ctrl.GetNodeOrNull<Control>("%CardContainer");
+                if (body != null)
+                {
+                    float angleRad = _autoRotateAngle * Mathf.Pi / 180.0f;
+                    float scaleX = Mathf.Cos(angleRad);
+                    body.PivotOffset = new Vector2(150, 211);
+                    body.Scale = new Vector2(scaleX, 1.0f);
+                }
+            }
+            catch { }
+        }
+
+        int count;
+        try { count = node.GetChildCount(); } catch { return; }
+        for (int i = 0; i < count; i++)
+        {
+            try { AutoRotateCards(node.GetChild(i)); } catch { }
+        }
+    }
+
+    private static void ResetCardScale(Node node)
+    {
+        if (node is MegaCrit.Sts2.Core.Nodes.Cards.NCard && node is Control ctrl)
+        {
+            var body = ctrl.GetNodeOrNull<Control>("%CardContainer");
+            if (body != null)
+            {
+                body.Scale = new Vector2(1.0f, 1.0f);
+            }
+        }
+
+        int count;
+        try { count = node.GetChildCount(); } catch { return; }
+        for (int i = 0; i < count; i++)
+        {
+            try { ResetCardScale(node.GetChild(i)); } catch { }
         }
     }
 
