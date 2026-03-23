@@ -102,49 +102,9 @@ public static class ModEntry
                 }
             }
 
-            // Update tilt shader params from mouse position
-            try
-            {
-                var body2 = card.GetNodeOrNull<Control>("%CardContainer");
-                var tiltMat = body2?.Material as ShaderMaterial;
-
-                var screenMouse = DisplayServer.MouseGetPosition();
-                var winPos = DisplayServer.WindowGetPosition();
-                var mouse = new Vector2(screenMouse.X - winPos.X, screenMouse.Y - winPos.Y);
-
-                var rect = body2 != null ? body2.GetGlobalRect() : portrait.GetGlobalRect();
-                if (rect.Size.X < 1 || rect.Size.Y < 1) return;
-
-                var center = rect.Position + rect.Size * 0.5f;
-                var rel = (mouse - center) / (rect.Size * 0.5f);
-                rel = rel.Clamp(new Vector2(-1.5f, -1.5f), new Vector2(1.5f, 1.5f));
-
-                // Update foil light_angle
-                var cur = mat!.GetShaderParameter("light_angle").AsVector2();
-                mat.SetShaderParameter("light_angle", cur.Lerp(rel, 0.2f));
-
-                // Update tilt shader
-                if (tiltMat != null)
-                {
-                    bool mouseOver = rect.HasPoint(mouse);
-                    float proximity = mouseOver ? 1.0f : Mathf.Max(0, 1.0f - (rel.Length() - 1.0f) * 2.0f);
-                    float tgtX = rel.X * 0.15f * proximity;
-                    float tgtY = rel.Y * 0.08f * proximity;
-                    try
-                    {
-                        float cX = (float)tiltMat.GetShaderParameter("tilt_x").AsDouble();
-                        float cY = (float)tiltMat.GetShaderParameter("tilt_y").AsDouble();
-                        tiltMat.SetShaderParameter("tilt_x", Mathf.Lerp(cX, tgtX, 0.2f));
-                        tiltMat.SetShaderParameter("tilt_y", Mathf.Lerp(cY, tgtY, 0.2f));
-                    }
-                    catch
-                    {
-                        tiltMat.SetShaderParameter("tilt_x", tgtX);
-                        tiltMat.SetShaderParameter("tilt_y", tgtY);
-                    }
-                }
-            }
-            catch { }
+            // Mouse tracking + tilt updates are done by the bridge's find_cards
+            // handler on the main thread. Background thread can't reliably call
+            // DisplayServer.MouseGetPosition(). Don't update shader params here.
         }
         catch { }
     }
