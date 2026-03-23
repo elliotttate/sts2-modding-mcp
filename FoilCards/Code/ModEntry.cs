@@ -19,7 +19,7 @@ public static class ModEntry
         {
             Log.Warn("[FoilCards] Init...");
 
-            // Background thread: find NCards, apply foil + tilt shader setup
+            // Background thread: find NCards, apply foil to portraits
             System.Threading.Tasks.Task.Run(async () =>
             {
                 await System.Threading.Tasks.Task.Delay(3000);
@@ -37,7 +37,7 @@ public static class ModEntry
                 }
             });
 
-            // Auto-start the continuous tilt update via bridge
+            // Auto-start continuous tilt loop via bridge
             System.Threading.Tasks.Task.Run(async () =>
             {
                 await System.Threading.Tasks.Task.Delay(5000);
@@ -82,7 +82,7 @@ public static class ModEntry
             var id = card.GetInstanceId();
             if (_setupCards.ContainsKey(id)) return;
 
-            // Apply foil shader to portrait
+            // Apply foil shader to portrait only (not the whole card)
             var portrait = card.GetNodeOrNull<TextureRect>("%Portrait");
             if (portrait != null && portrait.Visible && portrait.Texture != null && portrait.Material == null)
             {
@@ -92,26 +92,9 @@ public static class ModEntry
                     Log.Warn($"[FoilCards] Applied foil #{_applyCount}");
             }
 
-            // Apply tilt shader to CardContainer (Body) + set UseParentMaterial on children
-            var body = card.GetNodeOrNull<Control>("%CardContainer");
-            if (body != null)
-            {
-                if (body.Material == null)
-                {
-                    var tiltMat = new ShaderMaterial();
-                    tiltMat.Shader = FoilShader.GetTiltShader();
-                    tiltMat.SetShaderParameter("tilt_x", 0f);
-                    tiltMat.SetShaderParameter("tilt_y", 0f);
-                    body.Material = tiltMat;
-                }
-
-                // Make all children use parent's material
-                for (int i = 0; i < body.GetChildCount(); i++)
-                {
-                    if (body.GetChild(i) is CanvasItem ci)
-                        ci.UseParentMaterial = true;
-                }
-            }
+            // DO NOT apply UseParentMaterial or tilt shader here.
+            // The tilt is handled by the bridge's find_cards/card_tilt_test
+            // which wraps the card in a SubViewport for proper whole-card tilt.
 
             _setupCards[id] = true;
         }

@@ -18,160 +18,80 @@ uniform float noise_scale : hint_range(2.0, 30.0) = 10.0;
 uniform float noise_anim_speed : hint_range(0.0, 3.0) = 0.6;
 uniform float gloss_power : hint_range(4.0, 128.0) = 20.0;
 uniform float gloss_strength : hint_range(0.0, 1.5) = 0.5;
-
-// 3D perspective tilt — simulates card rotating on its vertical/horizontal axis
-// Higher values = more dramatic tilt effect
 uniform float tilt_strength : hint_range(0.0, 1.0) = 0.45;
 
-// --- Noise ---
-float hash(vec2 p) {
-    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-}
-
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float noise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    float a = hash(i); float b = hash(i + vec2(1.0, 0.0));
-    float c = hash(i + vec2(0.0, 1.0)); float d = hash(i + vec2(1.0, 1.0));
-    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    vec2 i = floor(p); vec2 f = fract(p); f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash(i), hash(i+vec2(1,0)), f.x), mix(hash(i+vec2(0,1)), hash(i+vec2(1,1)), f.x), f.y);
 }
-
-float fbm(vec2 p) {
-    float v = 0.5 * noise(p); p *= 2.01;
-    v += 0.25 * noise(p); p *= 2.02;
-    v += 0.125 * noise(p);
-    return v;
-}
-
+float fbm(vec2 p) { float v = 0.5*noise(p); p*=2.01; v+=0.25*noise(p); p*=2.02; v+=0.125*noise(p); return v; }
 vec3 hsv_to_rgb(float h, float s, float v) {
-    vec3 k = mod(vec3(5.0, 3.0, 1.0) + h * 6.0, 6.0);
-    return v - v * s * max(min(min(k, 4.0 - k), 1.0), 0.0);
+    vec3 k = mod(vec3(5,3,1)+h*6.0, 6.0); return v - v*s*max(min(min(k,4.0-k),1.0),0.0);
 }
 
 void fragment() {
-    // ===== 3D PERSPECTIVE TILT =====
-    // Simulates the card turning on its axis like a physical card.
-    // Maps light_angle to a perspective projection that compresses
-    // one side and expands the other.
-
-    vec2 centered = UV - 0.5;
-
-    // Perspective division — this is the key to the 3D look.
-    // When light_angle.x > 0, the right side compresses (farther away)
-    // and the left side expands (closer). Like looking at a card edge-on.
-    float tilt_x = light_angle.x * tilt_strength;
-    float tilt_y = light_angle.y * tilt_strength * 0.5; // less vertical tilt
-
-    // Perspective factor per pixel — varies across the card width/height
-    // This creates the trapezoid distortion that reads as 3D rotation
-    float persp = 1.0 + centered.x * tilt_x + centered.y * tilt_y;
-
-    // Prevent division by zero or negative values
+    vec2 c = UV - 0.5;
+    float persp = 1.0 + c.x * light_angle.x * tilt_strength + c.y * light_angle.y * tilt_strength * 0.5;
     persp = max(persp, 0.2);
-
-    // Apply perspective division — farther side gets compressed UVs
-    vec2 uv = vec2(centered.x / persp, centered.y / persp) + 0.5;
-
-    // Clamp and fade edges
+    vec2 uv = vec2(c.x / persp, c.y / persp) + 0.5;
     uv = clamp(uv, vec2(0.003), vec2(0.997));
     vec4 base_color = texture(TEXTURE, uv);
+    float facing = clamp(1.0 + c.x * light_angle.x * tilt_strength * 0.5, 0.75, 1.25);
+    vec2 ed = min(uv, 1.0-uv);
+    float edge_fade = smoothstep(0.0, 0.015, ed.x) * smoothstep(0.0, 0.015, ed.y);
 
-    float edge_fade = 1.0;
-    vec2 ed = min(uv, 1.0 - uv);
-    edge_fade = smoothstep(0.0, 0.015, ed.x) * smoothstep(0.0, 0.015, ed.y);
-
-    // ===== Lighting simulation for 3D tilt =====
-    // Darken the side that's turning away, brighten the side turning toward viewer
-    float facing = 1.0 + centered.x * tilt_x * 0.6;
-    facing = clamp(facing, 0.7, 1.3);
-
-    // ===== HOLOGRAPHIC STREAKS =====
     vec2 dir = normalize(vec2(0.65, 0.35));
-    float view_dot = dot(uv - 0.5, dir);
     float angle_shift = dot(light_angle, dir) * scroll_speed;
+    vec2 nuv = uv * noise_scale + vec2(TIME*noise_anim_speed*0.3, TIME*noise_anim_speed*0.17);
+    float streak = dot(uv-0.5, dir) * streak_density + angle_shift + fbm(nuv)*0.35;
+    float streak_mask = pow(sin(streak*3.14159)*0.5+0.5, 0.6);
+    vec3 rainbow = hsv_to_rgb(fract(streak*0.5+angle_shift*0.25), 0.65, 1.0);
 
-    vec2 noise_uv = uv * noise_scale + vec2(TIME * noise_anim_speed * 0.3, TIME * noise_anim_speed * 0.17);
-    float n = fbm(noise_uv) * 0.35;
+    vec2 gc = light_angle*0.3+0.5;
+    float gd = length(uv-gc);
+    float gloss = pow(max(1.0-gd*1.8,0.0), gloss_power)*gloss_strength + pow(max(1.0-gd,0.0),3.0)*0.12;
 
-    float streak = view_dot * streak_density + angle_shift + n;
-    float streak_mask = sin(streak * 3.14159) * 0.5 + 0.5;
-    streak_mask = pow(streak_mask, 0.6);
-
-    float hue = fract(streak * 0.5 + angle_shift * 0.25);
-    vec3 rainbow = hsv_to_rgb(hue, 0.65, 1.0);
-
-    // ===== GLOSS =====
-    vec2 gloss_center = light_angle * 0.3 + 0.5;
-    float gloss_dist = length(uv - gloss_center);
-    float gloss = pow(max(1.0 - gloss_dist * 1.8, 0.0), gloss_power) * gloss_strength;
-    float gloss_soft = pow(max(1.0 - gloss_dist * 1.0, 0.0), 3.0) * 0.12;
-
-    // ===== COMPOSITE =====
-    vec3 foil = rainbow * streak_mask + vec3(gloss + gloss_soft);
-
-    // Apply 3D lighting to base color
-    vec3 lit_base = base_color.rgb * facing;
-
-    // Screen blend foil over lit base
-    vec3 result = 1.0 - (1.0 - lit_base) * (1.0 - foil * intensity);
-
+    vec3 foil = rainbow * streak_mask + vec3(gloss);
+    vec3 lit = base_color.rgb * facing;
+    vec3 result = 1.0 - (1.0 - lit) * (1.0 - foil * intensity);
     result = mix(base_color.rgb, result, edge_fade);
-
     COLOR = vec4(result, base_color.a);
 }
 ";
 
-    public static Shader GetShader()
-    {
-        if (_shader == null)
-        {
-            _shader = new Shader();
-            _shader.Code = ShaderCode;
-        }
-        return _shader;
-    }
-
-    // Separate tilt shader for the whole card (applied to CardContainer)
+    // Simple tilt-only shader for the SubViewport output (whole card as one texture)
     private static Shader? _tiltShader;
     private const string TiltShaderCode = @"
 shader_type canvas_item;
 uniform float tilt_x = 0.0;
 uniform float tilt_y = 0.0;
-uniform vec2 card_center = vec2(0.5, 0.5);  // Screen-space card center (normalized)
-uniform vec2 card_size = vec2(300.0, 422.0); // Card pixel size
-
-// Use VERTEX to shift the actual geometry positions, creating real perspective
-void vertex() {
-    // Get position relative to card center in normalized space
-    vec2 local = (VERTEX - card_size * 0.5) / (card_size * 0.5);
-
-    // Perspective scale — vertices on the 'far' side move inward
-    float persp = 1.0 + local.x * tilt_x + local.y * tilt_y * 0.5;
-    persp = max(persp, 0.3);
-
-    // Scale vertex position by perspective (shrinks far side, expands near side)
-    VERTEX.x = (local.x / persp) * card_size.x * 0.5 + card_size.x * 0.5;
-    VERTEX.y = (local.y / persp) * card_size.y * 0.5 + card_size.y * 0.5;
-}
-
 void fragment() {
-    // Directional lighting — near side brighter, far side darker
-    vec2 local = UV - 0.5;
-    float facing = clamp(1.0 + local.x * tilt_x * 0.4, 0.8, 1.2);
-    vec4 col = texture(TEXTURE, UV);
+    vec2 c = UV - 0.5;
+    float persp = 1.0 + c.x * tilt_x + c.y * tilt_y * 0.5;
+    persp = max(persp, 0.2);
+    vec2 uv = vec2(c.x / persp, c.y / persp) + 0.5;
+    uv = clamp(uv, vec2(0.0), vec2(1.0));
+    float facing = clamp(1.0 + c.x * tilt_x * 0.4, 0.8, 1.2);
+    vec4 col = texture(TEXTURE, uv);
     col.rgb *= facing;
+    // Fade edges to transparent
+    vec2 ed = min(uv, 1.0 - uv);
+    float ef = smoothstep(0.0, 0.01, ed.x) * smoothstep(0.0, 0.01, ed.y);
+    col.a *= ef;
     COLOR = col;
 }
 ";
 
+    public static Shader GetShader()
+    {
+        if (_shader == null) { _shader = new Shader(); _shader.Code = ShaderCode; }
+        return _shader;
+    }
+
     public static Shader GetTiltShader()
     {
-        if (_tiltShader == null)
-        {
-            _tiltShader = new Shader();
-            _tiltShader.Code = TiltShaderCode;
-        }
+        if (_tiltShader == null) { _tiltShader = new Shader(); _tiltShader.Code = TiltShaderCode; }
         return _tiltShader;
     }
 
@@ -188,6 +108,15 @@ void fragment() {
         mat.SetShaderParameter("gloss_power", 20.0f);
         mat.SetShaderParameter("gloss_strength", 0.5f);
         mat.SetShaderParameter("tilt_strength", 0.45f);
+        return mat;
+    }
+
+    public static ShaderMaterial CreateTiltMaterial()
+    {
+        var mat = new ShaderMaterial();
+        mat.Shader = GetTiltShader();
+        mat.SetShaderParameter("tilt_x", 0f);
+        mat.SetShaderParameter("tilt_y", 0f);
         return mat;
     }
 }

@@ -3927,27 +3927,7 @@ public static class BridgeHandler
                     bool isOver = cRect.HasPoint(mousePos);
                     float prox = isOver ? 1.0f : Mathf.Max(0, 1.0f - (rel.Length() - 1.0f) * 2.0f);
 
-                    // Update tilt shader on CardContainer
-                    var tiltBody = ctrl.GetNodeOrNull<Control>("%CardContainer");
-                    if (tiltBody?.Material is ShaderMaterial tiltSm)
-                    {
-                        float tgtX = rel.X * 0.12f * prox;
-                        float tgtY = rel.Y * 0.06f * prox;
-                        try
-                        {
-                            float cX = (float)tiltSm.GetShaderParameter("tilt_x").AsDouble();
-                            float cY = (float)tiltSm.GetShaderParameter("tilt_y").AsDouble();
-                            tiltSm.SetShaderParameter("tilt_x", Mathf.Lerp(cX, tgtX, 0.25f));
-                            tiltSm.SetShaderParameter("tilt_y", Mathf.Lerp(cY, tgtY, 0.25f));
-                        }
-                        catch
-                        {
-                            tiltSm.SetShaderParameter("tilt_x", tgtX);
-                            tiltSm.SetShaderParameter("tilt_y", tgtY);
-                        }
-                    }
-
-                    // Update foil shader light angle
+                    // Update foil shader light_angle (drives both rainbow effect AND perspective tilt)
                     var portrait2 = ctrl.GetNodeOrNull<TextureRect>("%Portrait");
                     if (portrait2?.Material is ShaderMaterial sm)
                     {
@@ -3964,16 +3944,7 @@ public static class BridgeHandler
             }
             catch { }
 
-            if (doRotate)
-            {
-                var tiltBody2 = ctrl.GetNodeOrNull<Control>("%CardContainer");
-                if (tiltBody2?.Material is ShaderMaterial tm)
-                {
-                    float tiltVal = rotation * 0.01f; // rotation in "degrees" mapped to tilt strength
-                    tm.SetShaderParameter("tilt_x", tiltVal);
-                    info["tilt_set_to"] = tiltVal;
-                }
-            }
+            // doRotate is no longer used — tilt is driven by mouse via light_angle
 
             results.Add(info);
         }
@@ -4096,41 +4067,7 @@ void fragment() {
                     ["body_material"] = body.Material?.GetType().Name,
                 };
 
-                if (Mathf.Abs(tiltX) > 0.01f)
-                {
-                    // Try setting material directly on the NCard node.
-                    // In Godot, a CanvasItem's material processes its own draw
-                    // but for Control nodes with size 0 this won't work alone.
-                    // Instead, set use_parent_material on all children and apply
-                    // the shader to the card.
-
-                    if (_tiltShader == null)
-                    {
-                        _tiltShader = new Shader();
-                        _tiltShader.Code = TiltShaderCode;
-                    }
-
-                    // Apply shader to CardContainer (Body)
-                    var mat = body.Material as ShaderMaterial;
-                    if (mat == null || mat.Shader != _tiltShader)
-                    {
-                        mat = new ShaderMaterial();
-                        mat.Shader = _tiltShader;
-                        body.Material = mat;
-                    }
-                    mat.SetShaderParameter("tilt_x", tiltX);
-
-                    // Set use_parent_material on direct children so they inherit
-                    for (int ci = 0; ci < body.GetChildCount(); ci++)
-                    {
-                        var ch = body.GetChild(ci);
-                        if (ch is CanvasItem ci2)
-                            ci2.UseParentMaterial = true;
-                    }
-
-                    info["tilt_applied"] = tiltX;
-                    info["method"] = "use_parent_material";
-                }
+                // Tilt is handled by foil shader on portrait — no UseParentMaterial needed
 
                 results.Add(info);
             }
@@ -4305,30 +4242,8 @@ void fragment() {
                     ModEntry.WriteLog($"[FoilTilt] screenMouse=({screenMPos.X},{screenMPos.Y}) mouse=({mouseGlobal.X:F0},{mouseGlobal.Y:F0}) card=({cardRect.Position.X:F0},{cardRect.Position.Y:F0}) size=({cardRect.Size.X:F0},{cardRect.Size.Y:F0}) rel=({relative.X:F2},{relative.Y:F2})");
                 }
 
-                // 3D-style perspective tilt using skew + scale (not 2D rotation)
-                bool mouseOver = cardRect.HasPoint(mouseGlobal);
-                float proximity = mouseOver ? 1.0f : Mathf.Max(0, 1.0f - (relative.Length() - 1.0f) * 2.0f);
-
-                // Skew simulates the card tilting around its vertical axis
-                // (one side closer, other side farther — like a 3D rotation)
-                float targetSkew = relative.X * 0.08f * proximity;  // radians, ~4.5° max
-                float currentSkew = (float)card.Get("skew");
-                float newSkew = Mathf.Lerp(currentSkew, targetSkew, FoilTiltLerp);
-
-                // Non-uniform scale: compress width slightly when "tilted" to enhance 3D feel
-                float tiltAmount = Mathf.Abs(relative.X) * proximity;
-                float targetScaleX = 1.0f - tiltAmount * 0.04f; // max 4% narrower when fully tilted
-
-                // Also slight vertical perspective from Y mouse position
-                float targetSkewV = -relative.Y * 0.03f * proximity;
-
-                card.PivotOffset = card.Size * 0.5f;
-                card.Set("skew", newSkew + targetSkewV);
-                card.RotationDegrees = 0; // Reset any 2D rotation
-                var curScale = card.Scale;
-                float baseScale = Mathf.Max(curScale.X, curScale.Y); // use largest as base
-                if (baseScale > 0.5f && baseScale < 2.0f) // sanity check
-                    card.Scale = new Vector2(baseScale * targetScaleX, baseScale);
+                // Tilt is handled entirely by the foil shader on the portrait via light_angle
+                // No skew/scale/rotation needed on the card node itself
             }
             catch { }
         }
