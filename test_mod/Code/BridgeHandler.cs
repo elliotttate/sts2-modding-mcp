@@ -4006,14 +4006,16 @@ public static class BridgeHandler
             {
                 try
                 {
-                    // Increment angle
-                    _autoRotateAngle = (_autoRotateAngle + _autoRotateSpeed) % 360f;
-
-                    // Apply rotation via MainThreadDispatcher.Post (fire-and-forget)
+                    // Mouse-driven tilt: cache mouse position then update cards
                     MainThreadDispatcher.Post(() =>
                     {
                         try
                         {
+                            // Get mouse pos on main thread
+                            var screenMouse = DisplayServer.MouseGetPosition();
+                            var winPos = DisplayServer.WindowGetPosition();
+                            _cachedMousePos = new Vector2(screenMouse.X - winPos.X, screenMouse.Y - winPos.Y);
+
                             var tree = GodotEngine.GetMainLoop() as SceneTree;
                             if (tree?.Root == null) return;
                             AutoRotateCards(tree.Root);
@@ -4049,6 +4051,9 @@ public static class BridgeHandler
         return new { success = true, status = "stopped" };
     }
 
+    // Cached mouse position for the current frame (set once per tick)
+    private static Vector2 _cachedMousePos;
+
     private static void AutoRotateCards(Node node)
     {
         if (node is MegaCrit.Sts2.Core.Nodes.Cards.NCard && node is Control ctrl)
@@ -4056,30 +4061,65 @@ public static class BridgeHandler
             try
             {
                 var body = ctrl.GetNodeOrNull<Control>("%CardContainer");
-                if (body != null)
+                if (body == null) goto recurse;
+
+                // Get card rect from body or portrait
+                var portrait = ctrl.GetNodeOrNull<TextureRect>("%Portrait");
+                var rect = body.GetGlobalRect();
+                if (rect.Size.X < 1 || rect.Size.Y < 1 && portrait != null)
+                    rect = portrait.GetGlobalRect();
+                if (rect.Size.X < 1 || rect.Size.Y < 1) goto recurse;
+
+                // Mouse position relative to card center, normalized -1..1
+                var center = rect.Position + rect.Size * 0.5f;
+                var rel = (_cachedMousePos - center) / (rect.Size * 0.5f);
+                rel = rel.Clamp(new Vector2(-1.5f, -1.5f), new Vector2(1.5f, 1.5f));
+
+                // Proximity: 1.0 when mouse is over card, fades to 0 when far away
+                bool mouseOver = rect.HasPoint(_cachedMousePos);
+                float proximity = mouseOver ? 1.0f : Mathf.Max(0, 1.0f - (rel.Length() - 1.0f) * 2.0f);
+
+                // Tilt angle: max ~18 degrees (30% of 60°), driven by mouse X position
+                float tiltDeg = rel.X * 18.0f * proximity;
+                float tiltRad = tiltDeg * Mathf.Pi / 180.0f;
+                float cosA = Mathf.Cos(tiltRad);
+                float sinA = Mathf.Sin(tiltRad);
+
+                // Smooth lerp toward target
+                float curScaleX = body.Scale.X;
+                float curSkew = (float)body.Get("skew");
+                float targetScaleX = cosA;
+                float targetSkew = sinA * 0.12f;
+
+                body.PivotOffset = new Vector2(150, 211);
+                body.Scale = new Vector2(Mathf.Lerp(curScaleX, targetScaleX, 0.15f), 1.0f);
+                body.Set("skew", Mathf.Lerp(curSkew, targetSkew, 0.15f));
+
+                // Update foil shader — drives rainbow shift and sparkle based on tilt
+                if (body.Material is ShaderMaterial foilMat)
                 {
-                    float angleRad = _autoRotateAngle * Mathf.Pi / 180.0f;
-                    float cosA = Mathf.Cos(angleRad);
-                    float sinA = Mathf.Sin(angleRad);
-
-                    // Use Transform2D to create a perspective-like effect
-                    // The key: modify the CanvasItem's transform to simulate
-                    // Y-axis rotation, similar to how STS1 mod modifies the
-                    // projection matrix before card rendering.
-                    //
-                    // Transform2D columns: X basis, Y basis, Origin
-                    // For Y-axis rotation: compress X, add skew for perspective
-                    var center = new Vector2(150, 211);
-                    body.PivotOffset = center;
-
-                    // Scale X by cos(angle) for the foreshortening
-                    // Skew by sin(angle) for the perspective trapezoid
-                    body.Scale = new Vector2(cosA, 1.0f);
-                    body.Set("skew", sinA * 0.12f);
+                    // Use full relative position for the foil (not just X tilt)
+                    // so the rainbow/sparkle shifts as mouse moves in any direction
+                    float foilTiltX = rel.X * proximity;
+                    float foilTiltY = rel.Y * proximity;
+                    try
+                    {
+                        float cx = (float)foilMat.GetShaderParameter("tilt_x").AsDouble();
+                        float cy = (float)foilMat.GetShaderParameter("tilt_y").AsDouble();
+                        foilMat.SetShaderParameter("tilt_x", Mathf.Lerp(cx, foilTiltX, 0.15f));
+                        foilMat.SetShaderParameter("tilt_y", Mathf.Lerp(cy, foilTiltY, 0.15f));
+                    }
+                    catch
+                    {
+                        foilMat.SetShaderParameter("tilt_x", foilTiltX);
+                        foilMat.SetShaderParameter("tilt_y", foilTiltY);
+                    }
                 }
             }
             catch { }
         }
+
+        recurse:
 
         int count;
         try { count = node.GetChildCount(); } catch { return; }
