@@ -4063,11 +4063,20 @@ public static class BridgeHandler
                 var body = ctrl.GetNodeOrNull<Control>("%CardContainer");
                 if (body == null) goto recurse;
 
-                // Get card rect from body or portrait
-                var portrait = ctrl.GetNodeOrNull<TextureRect>("%Portrait");
-                var rect = body.GetGlobalRect();
-                if (rect.Size.X < 1 || rect.Size.Y < 1 && portrait != null)
-                    rect = portrait.GetGlobalRect();
+                // Build card rect from the Frame texture (covers the full card)
+                // CardContainer and NCard both have size (0,0) so we can't use their rects
+                var frame = ctrl.GetNodeOrNull<TextureRect>("%Frame");
+                Rect2 rect;
+                if (frame != null && frame.GetGlobalRect().Size.X > 1)
+                {
+                    rect = frame.GetGlobalRect();
+                }
+                else
+                {
+                    // Fallback: estimate from card position + standard card size
+                    var pos = ctrl.GlobalPosition;
+                    rect = new Rect2(pos.X - 150, pos.Y - 211, 300, 422);
+                }
                 if (rect.Size.X < 1 || rect.Size.Y < 1) goto recurse;
 
                 // Mouse position relative to card center, normalized -1..1
@@ -4079,21 +4088,39 @@ public static class BridgeHandler
                 bool mouseOver = rect.HasPoint(_cachedMousePos);
                 float proximity = mouseOver ? 1.0f : Mathf.Max(0, 1.0f - (rel.Length() - 1.0f) * 2.0f);
 
-                // Tilt angle: max ~18 degrees (30% of 60°), driven by mouse X position
-                float tiltDeg = rel.X * 18.0f * proximity;
-                float tiltRad = tiltDeg * Mathf.Pi / 180.0f;
-                float cosA = Mathf.Cos(tiltRad);
-                float sinA = Mathf.Sin(tiltRad);
+                // Tilt driven by mouse position relative to card
+                // X drives Y-axis rotation (card turns left/right)
+                // Y drives X-axis rotation (card tilts forward/back) via vertical skew
+                float tiltXDeg = rel.X * 25.0f * proximity;  // Y-axis tilt
+                float tiltYDeg = rel.Y * 15.0f * proximity;  // X-axis tilt (subtler)
 
-                // Smooth lerp toward target
-                float curScaleX = body.Scale.X;
-                float curSkew = (float)body.Get("skew");
+                float tiltXRad = tiltXDeg * Mathf.Pi / 180.0f;
+                float cosA = Mathf.Cos(tiltXRad);
+                float sinA = Mathf.Sin(tiltXRad);
+
+                // Y-axis rotation: Scale.X + horizontal skew
                 float targetScaleX = cosA;
-                float targetSkew = sinA * 0.12f;
+                float targetSkewH = sinA * 0.15f;
+
+                // X-axis rotation: Scale.Y + vertical skew
+                float tiltYRad = tiltYDeg * Mathf.Pi / 180.0f;
+                float cosB = Mathf.Cos(tiltYRad);
+                float targetScaleY = cosB;
+                float targetSkewV = Mathf.Sin(tiltYRad) * 0.08f;
+
+                // Combine skews
+                float targetSkew = targetSkewH + targetSkewV;
+
+                // Smooth lerp
+                float curScaleX = body.Scale.X;
+                float curScaleY = body.Scale.Y;
+                float curSkew = (float)body.Get("skew");
 
                 body.PivotOffset = new Vector2(150, 211);
-                body.Scale = new Vector2(Mathf.Lerp(curScaleX, targetScaleX, 0.15f), 1.0f);
-                body.Set("skew", Mathf.Lerp(curSkew, targetSkew, 0.15f));
+                body.Scale = new Vector2(
+                    Mathf.Lerp(curScaleX, targetScaleX, 0.12f),
+                    Mathf.Lerp(curScaleY, targetScaleY, 0.12f));
+                body.Set("skew", Mathf.Lerp(curSkew, targetSkew, 0.12f));
 
                 // Update foil shader — drives rainbow shift and sparkle based on tilt
                 if (body.Material is ShaderMaterial foilMat)
