@@ -3931,8 +3931,8 @@ public static class BridgeHandler
                     var tiltBody = ctrl.GetNodeOrNull<Control>("%CardContainer");
                     if (tiltBody?.Material is ShaderMaterial tiltSm)
                     {
-                        float tgtX = rel.X * 0.3f * prox;
-                        float tgtY = rel.Y * 0.15f * prox;
+                        float tgtX = rel.X * 0.12f * prox;
+                        float tgtY = rel.Y * 0.06f * prox;
                         try
                         {
                             float cX = (float)tiltSm.GetShaderParameter("tilt_x").AsDouble();

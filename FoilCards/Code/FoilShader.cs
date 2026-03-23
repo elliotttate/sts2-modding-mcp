@@ -138,14 +138,28 @@ void fragment() {
 shader_type canvas_item;
 uniform float tilt_x = 0.0;
 uniform float tilt_y = 0.0;
+uniform vec2 card_center = vec2(0.5, 0.5);  // Screen-space card center (normalized)
+uniform vec2 card_size = vec2(300.0, 422.0); // Card pixel size
+
+// Use VERTEX to shift the actual geometry positions, creating real perspective
+void vertex() {
+    // Get position relative to card center in normalized space
+    vec2 local = (VERTEX - card_size * 0.5) / (card_size * 0.5);
+
+    // Perspective scale — vertices on the 'far' side move inward
+    float persp = 1.0 + local.x * tilt_x + local.y * tilt_y * 0.5;
+    persp = max(persp, 0.3);
+
+    // Scale vertex position by perspective (shrinks far side, expands near side)
+    VERTEX.x = (local.x / persp) * card_size.x * 0.5 + card_size.x * 0.5;
+    VERTEX.y = (local.y / persp) * card_size.y * 0.5 + card_size.y * 0.5;
+}
+
 void fragment() {
-    vec2 c = UV - 0.5;
-    float persp = 1.0 + c.x * tilt_x + c.y * tilt_y * 0.5;
-    persp = max(persp, 0.15);
-    vec2 uv = vec2(c.x / persp, c.y / persp) + 0.5;
-    uv = clamp(uv, vec2(0.0), vec2(1.0));
-    float facing = clamp(1.0 + c.x * tilt_x * 0.5, 0.7, 1.3);
-    vec4 col = texture(TEXTURE, uv);
+    // Directional lighting — near side brighter, far side darker
+    vec2 local = UV - 0.5;
+    float facing = clamp(1.0 + local.x * tilt_x * 0.4, 0.8, 1.2);
+    vec4 col = texture(TEXTURE, UV);
     col.rgb *= facing;
     COLOR = col;
 }
