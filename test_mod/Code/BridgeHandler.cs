@@ -4117,28 +4117,19 @@ public static class BridgeHandler
 
                 float proximity = mouseOver ? 1.0f : 0.0f;
 
-                // Tilt: both X and Y axes
-                // Mouse left/right → card turns around vertical axis (Scale.X + skew)
-                // Mouse top/bottom → card tilts around horizontal axis (Scale.Y)
-                float tiltXDeg = rel.X * 25.0f * proximity;
-                float tiltYDeg = rel.Y * 15.0f * proximity;
+                // Physical tilt: X mouse → Y-axis rotation (Scale.X + skew)
+                // Y mouse → foil shader only (no physical vertical tilt — it just stretches)
+                float tiltDeg = rel.X * 25.0f * proximity;
+                float tiltRad = tiltDeg * Mathf.Pi / 180.0f;
 
-                float tiltXRad = tiltXDeg * Mathf.Pi / 180.0f;
-                float tiltYRad = tiltYDeg * Mathf.Pi / 180.0f;
+                float targetScaleX = Mathf.Cos(tiltRad);
+                float targetSkew = Mathf.Sin(tiltRad) * 0.15f;
 
-                float targetScaleX = Mathf.Cos(tiltXRad);
-                float targetScaleY = Mathf.Cos(tiltYRad);
-                float targetSkew = Mathf.Sin(tiltXRad) * 0.15f;
-
-                // Smooth lerp
                 float curScaleX = body.Scale.X;
-                float curScaleY = body.Scale.Y;
                 float curSkew = (float)body.Get("skew");
 
                 body.PivotOffset = cardCenter - body.GlobalPosition;
-                body.Scale = new Vector2(
-                    Mathf.Lerp(curScaleX, targetScaleX, 0.12f),
-                    Mathf.Lerp(curScaleY, targetScaleY, 0.12f));
+                body.Scale = new Vector2(Mathf.Lerp(curScaleX, targetScaleX, 0.12f), 1.0f);
                 body.Set("skew", Mathf.Lerp(curSkew, targetSkew, 0.12f));
 
                 // Update foil shader — drives rainbow shift and sparkle based on tilt
