@@ -4093,9 +4093,9 @@ public static class BridgeHandler
                 var rel = (_cachedMousePos - center) / (rect.Size * 0.5f);
                 rel = rel.Clamp(new Vector2(-1.5f, -1.5f), new Vector2(1.5f, 1.5f));
 
-                // Proximity: 1.0 when mouse is over card, fades to 0 when far away
+                // Only tilt the card the mouse is directly over — others return to flat
                 bool mouseOver = rect.HasPoint(_cachedMousePos);
-                float proximity = mouseOver ? 1.0f : Mathf.Max(0, 1.0f - (rel.Length() - 1.0f) * 2.0f);
+                float proximity = mouseOver ? 1.0f : 0.0f;
 
                 // Tilt driven by mouse position relative to card
                 // X drives horizontal tilt (card turns left/right around Y-axis)
