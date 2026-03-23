@@ -4063,24 +4063,33 @@ public static class BridgeHandler
                 var body = ctrl.GetNodeOrNull<Control>("%CardContainer");
                 if (body == null) goto recurse;
 
-                // Build card rect from the Frame texture (covers the full card)
-                // CardContainer and NCard both have size (0,0) so we can't use their rects
-                var frame = ctrl.GetNodeOrNull<TextureRect>("%Frame");
-                Rect2 rect;
-                if (frame != null && frame.GetGlobalRect().Size.X > 1)
+                // Get all visual children to compute the actual card bounding box
+                // This handles scaled/zoomed cards correctly
+                float minX = float.MaxValue, minY = float.MaxValue;
+                float maxX = float.MinValue, maxY = float.MinValue;
+                for (int ci = 0; ci < body.GetChildCount(); ci++)
                 {
-                    rect = frame.GetGlobalRect();
+                    try
+                    {
+                        if (body.GetChild(ci) is Control child && child.Visible)
+                        {
+                            var cr = child.GetGlobalRect();
+                            if (cr.Size.X > 1 && cr.Size.Y > 1)
+                            {
+                                minX = Mathf.Min(minX, cr.Position.X);
+                                minY = Mathf.Min(minY, cr.Position.Y);
+                                maxX = Mathf.Max(maxX, cr.Position.X + cr.Size.X);
+                                maxY = Mathf.Max(maxY, cr.Position.Y + cr.Size.Y);
+                            }
+                        }
+                    }
+                    catch { }
                 }
-                else
-                {
-                    // Fallback: estimate from card position + standard card size
-                    var pos = ctrl.GlobalPosition;
-                    rect = new Rect2(pos.X - 150, pos.Y - 211, 300, 422);
-                }
-                if (rect.Size.X < 1 || rect.Size.Y < 1) goto recurse;
+                if (minX >= maxX || minY >= maxY) goto recurse;
+                var rect = new Rect2(minX, minY, maxX - minX, maxY - minY);
 
                 // Mouse position relative to card center, normalized -1..1
-                var center = rect.Position + rect.Size * 0.5f;
+                var center = new Vector2((minX + maxX) * 0.5f, (minY + maxY) * 0.5f);
                 var rel = (_cachedMousePos - center) / (rect.Size * 0.5f);
                 rel = rel.Clamp(new Vector2(-1.5f, -1.5f), new Vector2(1.5f, 1.5f));
 
@@ -4089,37 +4098,23 @@ public static class BridgeHandler
                 float proximity = mouseOver ? 1.0f : Mathf.Max(0, 1.0f - (rel.Length() - 1.0f) * 2.0f);
 
                 // Tilt driven by mouse position relative to card
-                // X drives Y-axis rotation (card turns left/right)
-                // Y drives X-axis rotation (card tilts forward/back) via vertical skew
-                float tiltXDeg = rel.X * 25.0f * proximity;  // Y-axis tilt
-                float tiltYDeg = rel.Y * 15.0f * proximity;  // X-axis tilt (subtler)
+                // X drives horizontal tilt (card turns left/right around Y-axis)
+                // Uses Scale.X compression + skew for the 3D look
+                float tiltDeg = rel.X * 25.0f * proximity;
+                float tiltRad = tiltDeg * Mathf.Pi / 180.0f;
+                float cosA = Mathf.Cos(tiltRad);
+                float sinA = Mathf.Sin(tiltRad);
 
-                float tiltXRad = tiltXDeg * Mathf.Pi / 180.0f;
-                float cosA = Mathf.Cos(tiltXRad);
-                float sinA = Mathf.Sin(tiltXRad);
-
-                // Y-axis rotation: Scale.X + horizontal skew
                 float targetScaleX = cosA;
-                float targetSkewH = sinA * 0.15f;
-
-                // X-axis rotation: Scale.Y + vertical skew
-                float tiltYRad = tiltYDeg * Mathf.Pi / 180.0f;
-                float cosB = Mathf.Cos(tiltYRad);
-                float targetScaleY = cosB;
-                float targetSkewV = Mathf.Sin(tiltYRad) * 0.08f;
-
-                // Combine skews
-                float targetSkew = targetSkewH + targetSkewV;
+                float targetSkew = sinA * 0.15f;
 
                 // Smooth lerp
                 float curScaleX = body.Scale.X;
-                float curScaleY = body.Scale.Y;
                 float curSkew = (float)body.Get("skew");
 
-                body.PivotOffset = new Vector2(150, 211);
-                body.Scale = new Vector2(
-                    Mathf.Lerp(curScaleX, targetScaleX, 0.12f),
-                    Mathf.Lerp(curScaleY, targetScaleY, 0.12f));
+                // Use the actual pivot from the bounding box center
+                body.PivotOffset = center - body.GlobalPosition;
+                body.Scale = new Vector2(Mathf.Lerp(curScaleX, targetScaleX, 0.12f), 1.0f);
                 body.Set("skew", Mathf.Lerp(curSkew, targetSkew, 0.12f));
 
                 // Update foil shader — drives rainbow shift and sparkle based on tilt
