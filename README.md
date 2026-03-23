@@ -472,7 +472,7 @@ Restart Claude Desktop. The server tools should appear in the toolbox icon (hamm
 }
 ```
 
-**Option B — User scope** (`~/.claude/settings.json` under `mcpServers`):
+**Option B — User scope** (`~/.claude/mcp.json`, shared across all projects):
 
 ```json
 {
@@ -484,6 +484,8 @@ Restart Claude Desktop. The server tools should appear in the toolbox icon (hamm
   }
 }
 ```
+
+> **Note:** Claude Code does **not** support `mcpServers` inside `~/.claude/settings.json`. Use `.mcp.json` (project) or `~/.claude/mcp.json` (user) instead.
 
 Restart Claude Code and the server should appear in `/mcp`.
 

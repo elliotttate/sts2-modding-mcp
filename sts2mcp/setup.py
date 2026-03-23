@@ -486,12 +486,12 @@ def auto_detect_on_startup() -> None:
         save_config(config)
         print(f"[sts2mcp] Game found: {game_dir}", file=sys.stderr)
     else:
-        print("[sts2mcp] Game not found — set STS2_GAME_DIR or run: python -m sts2mcp.setup", file=sys.stderr)
+        print("[sts2mcp] Game not found -- set STS2_GAME_DIR or run: python -m sts2mcp.setup", file=sys.stderr)
 
     # Check decompiled state
     decomp = check_decompiled(config.get("decompiled_dir"))
     if not decomp["exists"]:
-        print("[sts2mcp] decompiled/ not found — run: python -m sts2mcp.setup", file=sys.stderr)
+        print("[sts2mcp] decompiled/ not found -- run: python -m sts2mcp.setup", file=sys.stderr)
 
 
 # ─── Interactive CLI ──────────────────────────────────────────────────────────
@@ -587,7 +587,9 @@ def run_full_setup(interactive: bool = True) -> dict:
         if game_dir:
             print(f"  Found: {game_dir}", file=sys.stderr)
         else:
-            print("  Not found. Set STS2_GAME_DIR environment variable to your game path.", file=sys.stderr)
+            print("  Not found. Set STS2_GAME_DIR environment variable to your game path and re-run setup.", file=sys.stderr)
+            if not interactive:
+                print("  Tip: STS2_GAME_DIR=\"/path/to/Slay the Spire 2\" python -m sts2mcp.setup --non-interactive", file=sys.stderr)
             if interactive:
                 try:
                     manual = input("  Enter game path (or press Enter to skip): ").strip().strip('"')
@@ -660,7 +662,7 @@ def run_full_setup(interactive: bool = True) -> dict:
     if gdre["installed"]:
         print(f"  Found: {gdre['path']}", file=sys.stderr)
     else:
-        print("  Not found (optional — needed for Godot asset extraction).", file=sys.stderr)
+        print("  Not found (optional -- needed for Godot asset extraction).", file=sys.stderr)
         if not interactive or _ask("  Download latest release?"):
             dl_result = download_gdre_tools()
             if dl_result["success"]:
@@ -683,7 +685,7 @@ def run_full_setup(interactive: bool = True) -> dict:
                 decomp = check_decompiled(decompiled_dir)
             else:
                 print(f"  Failed: {roslyn_result['error']}", file=sys.stderr)
-                print("  (The server will fall back to regex parsing — this is OK)", file=sys.stderr)
+                print("  (The server will fall back to regex parsing -- this is OK)", file=sys.stderr)
         else:
             print("  Skipped (requires .NET SDK)", file=sys.stderr)
     else:
@@ -715,7 +717,7 @@ def run_full_setup(interactive: bool = True) -> dict:
 def cli_main():
     """Entry point for `python -m sts2mcp.setup` and `sts2mcp-setup` command."""
     import argparse
-    parser = argparse.ArgumentParser(description="STS2 Modding MCP — automated setup")
+    parser = argparse.ArgumentParser(description="STS2 Modding MCP -- automated setup")
     parser.add_argument("--non-interactive", action="store_true", help="Skip prompts, only detect")
     parser.add_argument("--status", action="store_true", help="Show setup status and exit")
     args = parser.parse_args()
