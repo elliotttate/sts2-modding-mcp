@@ -4095,16 +4095,35 @@ public static class BridgeHandler
                 var rel = (_cachedMousePos - center) / (rect.Size * 0.5f);
                 rel = rel.Clamp(new Vector2(-1.5f, -1.5f), new Vector2(1.5f, 1.5f));
 
-                // Only tilt the card the mouse is directly over — others return to flat
-                bool mouseOver = rect.HasPoint(_cachedMousePos);
-                float proximity = mouseOver ? 1.0f : 0.0f;
-
-                // Debug: log tilt state
-                if (_autoRotateDebug < 5 && mouseOver)
+                // Detect hover by checking the card holder's _isHovered field
+                // or by checking if the NCard's parent holder scale is larger (hover = zoomed)
+                bool mouseOver = false;
+                try
                 {
-                    _autoRotateDebug++;
-                    ModEntry.WriteLog($"[Tilt] rect=({rect.Position.X:F0},{rect.Position.Y:F0} {rect.Size.X:F0}x{rect.Size.Y:F0}) mouse=({_cachedMousePos.X:F0},{_cachedMousePos.Y:F0}) rel=({rel.X:F2},{rel.Y:F2})");
+                    var parent = ctrl.GetParent();
+                    if (parent != null)
+                    {
+                        // NCardHolder has _isHovered — read via reflection
+                        var hoveredField = parent.GetType().GetField("_isHovered",
+                            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                        if (hoveredField != null)
+                            mouseOver = (bool)hoveredField.GetValue(parent)!;
+                    }
                 }
+                catch { }
+
+                // Fallback: check if scale is larger than default (hovered cards zoom up)
+                if (!mouseOver)
+                {
+                    try
+                    {
+                        var parentScale = ctrl.GetParent<Control>()?.Scale ?? Vector2.One;
+                        mouseOver = parentScale.X > 0.95f; // hovered cards are ~1.0-1.1, non-hovered ~0.8
+                    }
+                    catch { }
+                }
+
+                float proximity = mouseOver ? 1.0f : 0.0f;
 
                 // Tilt driven by mouse position relative to card
                 // X drives horizontal tilt (card turns left/right around Y-axis)
