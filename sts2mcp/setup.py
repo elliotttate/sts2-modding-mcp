@@ -110,6 +110,11 @@ def _parse_steam_library_folders() -> list[str]:
             Path.home() / ".local" / "share" / "Steam",
             Path.home() / ".steam" / "debian-installation",
             Path("/usr/share/steam"),
+            # Flatpak Steam
+            Path.home() / ".var" / "app" / "com.valvesoftware.Steam" / ".steam" / "steam",
+            Path.home() / ".var" / "app" / "com.valvesoftware.Steam" / ".local" / "share" / "Steam",
+            # Snap Steam
+            Path.home() / "snap" / "steam" / "common" / ".steam" / "steam",
         ]
 
     paths: list[str] = []
@@ -138,33 +143,60 @@ def _parse_steam_library_folders() -> list[str]:
 
 
 # Platform-specific game binary paths (subfolder, filename)
+# On Windows/Linux the data dirs are at the top level of the game directory.
+# On macOS the game is packaged as an .app bundle; the data dirs live inside
+# SlayTheSpire2.app/Contents/Resources/.
+# The game assembly is a .NET DLL on all platforms — macOS ships sts2.dll (not
+# .dylib) and Linux may ship sts2.dll too (not .so).  We try both extensions.
 _GAME_BINARY_CANDIDATES = {
     "win32": [("data_sts2_windows_x86_64", "sts2.dll")],
-    "linux": [("data_sts2_linuxbsd_x86_64", "sts2.so"), ("data_sts2_linux_x86_64", "sts2.so")],
-    "darwin": [("data_sts2_macos_x86_64", "sts2.dylib"), ("data_sts2_macos_arm64", "sts2.dylib")],
+    "linux": [
+        ("data_sts2_linuxbsd_x86_64", "sts2.dll"),
+        ("data_sts2_linuxbsd_x86_64", "sts2.so"),
+        ("data_sts2_linux_x86_64", "sts2.dll"),
+        ("data_sts2_linux_x86_64", "sts2.so"),
+    ],
+    "darwin": [("data_sts2_macos_arm64", "sts2.dll"), ("data_sts2_macos_x86_64", "sts2.dll")],
 }
 
 
+def _get_game_search_roots(game_dir: str) -> list[str]:
+    """Return directories to search for data_sts2_* folders.
+
+    On macOS the game is inside an .app bundle, so we also search inside
+    SlayTheSpire2.app/Contents/Resources/.  On Windows/Linux the data dirs
+    sit directly under the game directory.
+    """
+    roots = [game_dir]
+    if sys.platform == "darwin":
+        # Look inside any .app bundle in the game directory
+        try:
+            for entry in os.listdir(game_dir):
+                if entry.endswith(".app"):
+                    resources = os.path.join(game_dir, entry, "Contents", "Resources")
+                    if os.path.isdir(resources):
+                        roots.append(resources)
+        except OSError:
+            pass
+    return roots
+
+
 def find_game_binary(game_dir: str) -> str | None:
-    """Find the game binary (sts2.dll/.so/.dylib) inside a game directory. Returns path or None."""
+    """Find the game binary (sts2.dll/.so) inside a game directory. Returns path or None."""
     platform = sys.platform if sys.platform in _GAME_BINARY_CANDIDATES else "linux"
-    for subfolder, binary in _GAME_BINARY_CANDIDATES[platform]:
-        p = os.path.join(game_dir, subfolder, binary)
-        if os.path.isfile(p):
-            return p
+    for root in _get_game_search_roots(game_dir):
+        for subfolder, binary in _GAME_BINARY_CANDIDATES[platform]:
+            p = os.path.join(root, subfolder, binary)
+            if os.path.isfile(p):
+                return p
     return None
 
 
 def _check_game_at(library_path: str) -> str | None:
     """Check if STS2 is installed under a Steam library path. Returns game dir or None."""
     game_dir = os.path.join(library_path, "steamapps", "common", "Slay the Spire 2")
-    platform = sys.platform if sys.platform in _GAME_BINARY_CANDIDATES else "linux"
-    for subfolder, binary in _GAME_BINARY_CANDIDATES[platform]:
-        try:
-            if os.path.isfile(os.path.join(game_dir, subfolder, binary)):
-                return game_dir
-        except OSError:
-            pass
+    if find_game_binary(game_dir):
+        return game_dir
     # Fallback: check if the game dir exists at all (might have different binary layout)
     try:
         if os.path.isdir(game_dir) and any(
@@ -317,25 +349,46 @@ def run_decompile(game_dir: str, decompiled_dir: str | None = None) -> dict:
         return {"success": False, "error": "Decompilation timed out (5 min limit)"}
 
 
+def _gdre_binary_name() -> str:
+    """Return the platform-specific GDRE Tools binary name/path."""
+    if sys.platform == "win32":
+        return "gdre_tools.exe"
+    elif sys.platform == "darwin":
+        return os.path.join("Godot RE Tools.app", "Contents", "MacOS", "Godot RE Tools")
+    else:
+        return "gdre_tools.x86_64"
+
+
 def check_gdre_tools() -> dict:
     """Check if GDRE Tools binary is available."""
     env_path = os.environ.get("GDRE_TOOLS_PATH")
     config_path = load_config().get("gdre_tools_path")
-    default_path = TOOLS_DIR / "gdre_tools.exe"
+    default_path = TOOLS_DIR / _gdre_binary_name()
 
     for p in [env_path, config_path, str(default_path)]:
         if p and os.path.isfile(p):
             return {"installed": True, "path": p}
 
-    found = shutil.which("gdre_tools")
-    if found:
-        return {"installed": True, "path": found}
+    # Also check for the .app bundle on macOS (user may have just extracted the zip)
+    if sys.platform == "darwin":
+        for app_name in ("Godot RE Tools.app", "GDRE_tools.app"):
+            app_bundle = TOOLS_DIR / app_name
+            if app_bundle.exists():
+                for binary_name in ("Godot RE Tools", "GDRE_tools"):
+                    inner = app_bundle / "Contents" / "MacOS" / binary_name
+                    if inner.exists():
+                        return {"installed": True, "path": str(inner)}
+
+    for name in ("gdre_tools", "gdre_tools.x86_64", "GDRE_tools", "Godot RE Tools"):
+        found = shutil.which(name)
+        if found:
+            return {"installed": True, "path": found}
 
     return {"installed": False, "path": None}
 
 
 def download_gdre_tools() -> dict:
-    """Download latest GDRE Tools release from GitHub."""
+    """Download latest GDRE Tools release from GitHub (platform-aware)."""
     api_url = "https://api.github.com/repos/GDRETools/gdsdecomp/releases/latest"
     try:
         req = request.Request(api_url, headers={"Accept": "application/vnd.github.v3+json", "User-Agent": "sts2mcp-setup"})
@@ -344,18 +397,25 @@ def download_gdre_tools() -> dict:
     except Exception as e:
         return {"success": False, "error": f"Failed to fetch release info: {e}. Download manually from https://github.com/GDRETools/gdsdecomp/releases"}
 
-    # Find the Windows zip asset
+    # Determine which platform asset to download
+    if sys.platform == "win32":
+        platform_key = "windows"
+    elif sys.platform == "darwin":
+        platform_key = "macos"
+    else:
+        platform_key = "linux"
+
     asset_url = None
     asset_name = None
     for asset in release.get("assets", []):
         name = asset["name"].lower()
-        if "windows" in name and name.endswith(".zip"):
+        if platform_key in name and name.endswith(".zip"):
             asset_url = asset["browser_download_url"]
             asset_name = asset["name"]
             break
 
     if not asset_url:
-        return {"success": False, "error": "No Windows release asset found. Download manually from https://github.com/GDRETools/gdsdecomp/releases"}
+        return {"success": False, "error": f"No {platform_key} release asset found. Download manually from https://github.com/GDRETools/gdsdecomp/releases"}
 
     TOOLS_DIR.mkdir(parents=True, exist_ok=True)
     zip_path = TOOLS_DIR / asset_name
@@ -374,17 +434,47 @@ def download_gdre_tools() -> dict:
     except Exception as e:
         return {"success": False, "error": f"Extraction failed: {e}"}
 
-    # Verify
-    exe_path = TOOLS_DIR / "gdre_tools.exe"
-    if not exe_path.exists():
-        # Might be in a subdirectory
-        for f in TOOLS_DIR.rglob("gdre_tools.exe"):
-            exe_path = f
-            break
+    # On macOS, clear the quarantine attribute so the binary can execute
+    if sys.platform == "darwin":
+        # Find any .app bundle that was extracted
+        for app_name in ("Godot RE Tools.app", "GDRE_tools.app"):
+            app_bundle = TOOLS_DIR / app_name
+            if app_bundle.exists():
+                try:
+                    subprocess.run(
+                        ["xattr", "-rd", "com.apple.quarantine", str(app_bundle)],
+                        capture_output=True, timeout=10,
+                    )
+                except Exception:
+                    pass  # Non-fatal — user can do it manually
+                break
 
-    if exe_path.exists():
-        return {"success": True, "path": str(exe_path), "version": release.get("tag_name", "unknown")}
-    return {"success": False, "error": "Extracted archive but gdre_tools.exe not found"}
+    # Verify the binary exists
+    expected_binary = TOOLS_DIR / _gdre_binary_name()
+    if not expected_binary.exists():
+        # Search for it in subdirectories
+        if sys.platform == "darwin":
+            # macOS app bundle binary could have various names
+            for f in TOOLS_DIR.rglob("*"):
+                if f.is_file() and "MacOS" in str(f) and f.parent.name == "MacOS":
+                    expected_binary = f
+                    break
+        elif sys.platform == "win32":
+            for f in TOOLS_DIR.rglob("gdre_tools.exe"):
+                expected_binary = f
+                break
+        else:
+            for f in TOOLS_DIR.rglob("gdre_tools*"):
+                if f.is_file() and not f.suffix in (".pck", ".so"):
+                    expected_binary = f
+                    break
+
+    if expected_binary.exists():
+        # Ensure executable on Unix
+        if sys.platform != "win32":
+            expected_binary.chmod(expected_binary.stat().st_mode | 0o755)
+        return {"success": True, "path": str(expected_binary), "version": release.get("tag_name", "unknown")}
+    return {"success": False, "error": f"Extracted archive but GDRE Tools binary not found in {TOOLS_DIR}"}
 
 
 # ─── Status ───────────────────────────────────────────────────────────────────

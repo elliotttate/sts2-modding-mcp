@@ -2,6 +2,7 @@
 
 import json
 import re
+import sys
 from pathlib import Path
 
 from .project_workflow import (
@@ -173,32 +174,75 @@ def _build_hook_method_stub(hook_signature: dict, comment: str, include_flash: b
     )
 
 
+def _get_game_search_roots(game_dir: Path) -> list[Path]:
+    """Return directories to search for data_sts2_* and mods folders.
+
+    On macOS the game is packaged as a .app bundle (e.g. SlayTheSpire2.app).
+    Data dirs live inside Contents/Resources/ and mods inside Contents/MacOS/mods/.
+    On Windows/Linux these sit directly under the game directory.
+    """
+    roots = [game_dir]
+    if sys.platform == "darwin":
+        try:
+            for entry in game_dir.iterdir():
+                if entry.suffix == ".app" and entry.is_dir():
+                    resources = entry / "Contents" / "Resources"
+                    if resources.is_dir():
+                        roots.append(resources)
+        except OSError:
+            pass
+    return roots
+
+
+def _find_mods_dir(game_dir: Path) -> Path:
+    """Find the mods directory for the current platform.
+
+    On macOS mods live inside the .app bundle at Contents/MacOS/mods/.
+    On Windows/Linux they sit directly under the game directory.
+    """
+    if sys.platform == "darwin":
+        try:
+            for entry in game_dir.iterdir():
+                if entry.suffix == ".app" and entry.is_dir():
+                    macos_mods = entry / "Contents" / "MacOS" / "mods"
+                    if macos_mods.is_dir():
+                        return macos_mods
+                    # If the mods dir doesn't exist yet, return where it should be
+                    macos_dir = entry / "Contents" / "MacOS"
+                    if macos_dir.is_dir():
+                        return macos_mods
+        except OSError:
+            pass
+    return game_dir / "mods"
+
+
 class ModGenerator:
     def __init__(self, game_dir: str):
         self.game_dir = Path(game_dir)
         self.data_dir = self._find_data_dir()
-        self.mods_dir = self.game_dir / "mods"
+        self.mods_dir = _find_mods_dir(self.game_dir)
 
     def _find_data_dir(self) -> Path:
         """Find the platform-specific data directory inside the game folder."""
-        import sys
         prefixes = {
             "win32": ["data_sts2_windows_x86_64"],
             "linux": ["data_sts2_linuxbsd_x86_64", "data_sts2_linux_x86_64"],
-            "darwin": ["data_sts2_macos_x86_64", "data_sts2_macos_arm64"],
+            "darwin": ["data_sts2_macos_arm64", "data_sts2_macos_x86_64"],
         }
         platform = sys.platform if sys.platform in prefixes else "linux"
-        for name in prefixes[platform]:
-            candidate = self.game_dir / name
-            if candidate.is_dir():
-                return candidate
-        # Fallback: find any data_sts2_* directory
-        try:
-            for d in self.game_dir.iterdir():
-                if d.is_dir() and d.name.startswith("data_sts2_"):
-                    return d
-        except OSError:
-            pass
+        for root in _get_game_search_roots(self.game_dir):
+            for name in prefixes[platform]:
+                candidate = root / name
+                if candidate.is_dir():
+                    return candidate
+        # Fallback: find any data_sts2_* directory (search all roots)
+        for root in _get_game_search_roots(self.game_dir):
+            try:
+                for d in root.iterdir():
+                    if d.is_dir() and d.name.startswith("data_sts2_"):
+                        return d
+            except OSError:
+                pass
         # Last resort: return the Windows default (will fail gracefully later)
         return self.game_dir / "data_sts2_windows_x86_64"
 

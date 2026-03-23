@@ -9,6 +9,7 @@ Wraps the gdre_tools CLI (https://github.com/GDRETools/gdsdecomp) for:
 
 import fnmatch
 import os
+import sys
 import subprocess
 from pathlib import Path
 
@@ -22,9 +23,18 @@ MAX_SEARCH_RESULTS = 500
 MAX_STDOUT_CHARS = 2000
 MAX_STDOUT_CHARS_LONG = 4000  # for decompile/convert output
 
-# Default path to gdre_tools binary (relative to project root)
+# Default path to gdre_tools binary (relative to project root, platform-aware)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_DEFAULT_GDRE_PATH = str(_PROJECT_ROOT / "tools" / "gdre_tools.exe")
+
+def _default_gdre_path() -> str:
+    if sys.platform == "win32":
+        return str(_PROJECT_ROOT / "tools" / "gdre_tools.exe")
+    elif sys.platform == "darwin":
+        return str(_PROJECT_ROOT / "tools" / "Godot RE Tools.app" / "Contents" / "MacOS" / "Godot RE Tools")
+    else:
+        return str(_PROJECT_ROOT / "tools" / "gdre_tools.x86_64")
+
+_DEFAULT_GDRE_PATH = _default_gdre_path()
 
 # Caches
 _game_pck_cache: str | None = None
@@ -51,8 +61,17 @@ def _find_gdre() -> str:
     resolved = _resolve_gdre_path()
     if os.path.isfile(resolved):
         return resolved
+    # On macOS, also try setup module's check which scans for app bundles
+    if sys.platform == "darwin":
+        try:
+            from sts2mcp.setup import check_gdre_tools
+            result = check_gdre_tools()
+            if result.get("installed") and result.get("path"):
+                return result["path"]
+        except Exception:
+            pass
     import shutil
-    found = shutil.which("gdre_tools")
+    found = shutil.which("gdre_tools") or shutil.which("gdre_tools.x86_64") or shutil.which("Godot RE Tools")
     if found:
         return found
     raise FileNotFoundError(
@@ -63,24 +82,44 @@ def _find_gdre() -> str:
 
 
 def _find_game_pck(game_dir: str) -> str:
-    """Auto-detect the game PCK file in the game directory."""
+    """Auto-detect the game PCK file in the game directory.
+
+    On macOS the PCK lives inside the .app bundle at
+    SlayTheSpire2.app/Contents/Resources/Slay the Spire 2.pck.
+    On Windows/Linux it's at the top level of the game directory.
+    """
     global _game_pck_cache
     if _game_pck_cache and os.path.isfile(_game_pck_cache):
         return _game_pck_cache
 
-    candidates = [
-        os.path.join(game_dir, "SlayTheSpire2.pck"),
-        os.path.join(game_dir, "game.pck"),
-        os.path.join(game_dir, "data.pck"),
-    ]
-    try:
-        for f in os.listdir(game_dir):
-            if f.endswith(".pck"):
-                full = os.path.join(game_dir, f)
-                if full not in candidates:
-                    candidates.append(full)
-    except OSError:
-        pass
+    # Build a list of directories to search for .pck files
+    search_dirs = [game_dir]
+    if sys.platform == "darwin":
+        try:
+            for entry in os.listdir(game_dir):
+                if entry.endswith(".app"):
+                    resources = os.path.join(game_dir, entry, "Contents", "Resources")
+                    if os.path.isdir(resources):
+                        search_dirs.append(resources)
+        except OSError:
+            pass
+
+    candidates = []
+    for d in search_dirs:
+        candidates += [
+            os.path.join(d, "SlayTheSpire2.pck"),
+            os.path.join(d, "Slay the Spire 2.pck"),
+            os.path.join(d, "game.pck"),
+            os.path.join(d, "data.pck"),
+        ]
+        try:
+            for f in os.listdir(d):
+                if f.endswith(".pck"):
+                    full = os.path.join(d, f)
+                    if full not in candidates:
+                        candidates.append(full)
+        except OSError:
+            pass
 
     for c in candidates:
         if os.path.isfile(c):

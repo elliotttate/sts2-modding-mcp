@@ -2955,7 +2955,7 @@ async def _handle_tool(name: str, args: dict):
             "game_dir": GAME_DIR,
             "decompiled_dir": DECOMPILED_DIR,
             "data_dir": str(mod_gen.data_dir),
-            "mods_dir": str(Path(GAME_DIR) / "mods"),
+            "mods_dir": str(mod_gen.mods_dir),
             "release_info": release_info,
             "entity_summary": game_data.get_entity_types_summary(),
             "total_entities": len(game_data.entities),
