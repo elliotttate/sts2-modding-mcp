@@ -32,9 +32,9 @@ uniform float gloss_power : hint_range(4.0, 128.0) = 20.0;
 // Gloss highlight brightness
 uniform float gloss_strength : hint_range(0.0, 1.5) = 0.5;
 // Parallax UV shift strength (pseudo-3D)
-uniform float parallax_strength : hint_range(0.0, 0.06) = 0.025;
+uniform float parallax_strength : hint_range(0.0, 0.08) = 0.03;
 // Perspective warp strength (pseudo-3D trapezoid distortion)
-uniform float perspective_strength : hint_range(0.0, 0.25) = 0.12;
+uniform float perspective_strength : hint_range(0.0, 0.35) = 0.18;
 
 // --- Procedural noise ---
 float hash(vec2 p) {
@@ -154,8 +154,8 @@ void fragment() {
         mat.SetShaderParameter("noise_anim_speed", 0.6f);
         mat.SetShaderParameter("gloss_power", 20.0f);
         mat.SetShaderParameter("gloss_strength", 0.5f);
-        mat.SetShaderParameter("parallax_strength", 0.012f);
-        mat.SetShaderParameter("perspective_strength", 0.06f);
+        mat.SetShaderParameter("parallax_strength", 0.03f);
+        mat.SetShaderParameter("perspective_strength", 0.18f);
         return mat;
     }
 }

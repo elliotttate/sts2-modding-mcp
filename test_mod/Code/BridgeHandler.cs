@@ -3902,8 +3902,11 @@ public static class BridgeHandler
             if (doRotate)
             {
                 ctrl.PivotOffset = ctrl.Size * 0.5f;
-                ctrl.RotationDegrees = rotation;
-                info["rotation_set_to"] = rotation;
+                // Convert degrees to skew radians for 3D-like tilt
+                float skewRad = rotation * Mathf.Pi / 180.0f * 0.15f;
+                ctrl.Set("skew", skewRad);
+                ctrl.RotationDegrees = 0;
+                info["skew_set_to"] = skewRad;
             }
 
             results.Add(info);
@@ -4025,13 +4028,30 @@ public static class BridgeHandler
                     catch { mat.SetShaderParameter("light_angle", relative); }
                 }
 
-                // Tilt
+                // 3D-style perspective tilt using skew + scale (not 2D rotation)
                 bool mouseOver = cardRect.HasPoint(mouseGlobal);
                 float proximity = mouseOver ? 1.0f : Mathf.Max(0, 1.0f - (relative.Length() - 1.0f) * 2.0f);
-                float targetRot = -relative.X * FoilMaxTilt * proximity;
+
+                // Skew simulates the card tilting around its vertical axis
+                // (one side closer, other side farther — like a 3D rotation)
+                float targetSkew = relative.X * 0.08f * proximity;  // radians, ~4.5° max
+                float currentSkew = (float)card.Get("skew");
+                float newSkew = Mathf.Lerp(currentSkew, targetSkew, FoilTiltLerp);
+
+                // Non-uniform scale: compress width slightly when "tilted" to enhance 3D feel
+                float tiltAmount = Mathf.Abs(relative.X) * proximity;
+                float targetScaleX = 1.0f - tiltAmount * 0.04f; // max 4% narrower when fully tilted
+
+                // Also slight vertical perspective from Y mouse position
+                float targetSkewV = -relative.Y * 0.03f * proximity;
 
                 card.PivotOffset = card.Size * 0.5f;
-                card.RotationDegrees = Mathf.Lerp(card.RotationDegrees, targetRot, FoilTiltLerp);
+                card.Set("skew", newSkew + targetSkewV);
+                card.RotationDegrees = 0; // Reset any 2D rotation
+                var curScale = card.Scale;
+                float baseScale = Mathf.Max(curScale.X, curScale.Y); // use largest as base
+                if (baseScale > 0.5f && baseScale < 2.0f) // sanity check
+                    card.Scale = new Vector2(baseScale * targetScaleX, baseScale);
             }
             catch { }
         }
