@@ -33,24 +33,8 @@ public static class ModEntry
                             WalkAndSetup(tree.Root);
                     }
                     catch { }
-                    await System.Threading.Tasks.Task.Delay(500);
+                    await System.Threading.Tasks.Task.Delay(100); // ~10fps for smooth light updates
                 }
-            });
-
-            // Auto-start continuous tilt loop via bridge
-            System.Threading.Tasks.Task.Run(async () =>
-            {
-                await System.Threading.Tasks.Task.Delay(5000);
-                try
-                {
-                    var client = new System.Net.Sockets.TcpClient("127.0.0.1", 21337);
-                    var json = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"start_card_tilt_loop\"}";
-                    var data = System.Text.Encoding.UTF8.GetBytes(json + "\n");
-                    client.GetStream().Write(data, 0, data.Length);
-                    client.Close();
-                    Log.Warn("[FoilCards] Started tilt loop via bridge.");
-                }
-                catch { }
             });
 
             Log.Warn("[FoilCards] Init complete.");
@@ -80,23 +64,58 @@ public static class ModEntry
         {
             if (!card.IsNodeReady()) return;
             var id = card.GetInstanceId();
-            if (_setupCards.ContainsKey(id)) return;
 
-            // Apply foil shader to portrait only (not the whole card)
+            // Apply foil shader to portrait
             var portrait = card.GetNodeOrNull<TextureRect>("%Portrait");
-            if (portrait != null && portrait.Visible && portrait.Texture != null && portrait.Material == null)
+            if (portrait == null || !portrait.Visible || portrait.Texture == null) return;
+
+            ShaderMaterial? mat = null;
+
+            if (_setupCards.ContainsKey(id))
             {
-                portrait.Material = FoilShader.CreateMaterial();
+                // Already set up — just update light_angle
+                mat = portrait.Material as ShaderMaterial;
+                if (mat == null) return;
+            }
+            else
+            {
+                if (portrait.Material != null) return; // blur/other
+                mat = FoilShader.CreateMaterial();
+                portrait.Material = mat;
+                _setupCards[id] = true;
                 _applyCount++;
                 if (_applyCount <= 20)
                     Log.Warn($"[FoilCards] Applied foil #{_applyCount}");
             }
 
-            // DO NOT apply UseParentMaterial or tilt shader here.
-            // The tilt is handled by the bridge's find_cards/card_tilt_test
-            // which wraps the card in a SubViewport for proper whole-card tilt.
+            // Update light_angle from mouse position (DisplayServer works from any thread)
+            try
+            {
+                var screenMouse = DisplayServer.MouseGetPosition();
+                var winPos = DisplayServer.WindowGetPosition();
+                var mousePos = new Vector2(screenMouse.X - winPos.X, screenMouse.Y - winPos.Y);
 
-            _setupCards[id] = true;
+                // Get card rect via portrait's parent chain (Body/CardContainer)
+                var body = card.GetNodeOrNull<Control>("%CardContainer");
+                var cRect = body != null ? body.GetGlobalRect() : portrait.GetGlobalRect();
+                if (cRect.Size.X < 1 || cRect.Size.Y < 1) return;
+
+                var center = cRect.Position + cRect.Size * 0.5f;
+                var rel = (mousePos - center) / (cRect.Size * 0.5f);
+                rel = rel.Clamp(new Vector2(-1.5f, -1.5f), new Vector2(1.5f, 1.5f));
+
+                // Smooth lerp the light angle
+                try
+                {
+                    var cur = mat.GetShaderParameter("light_angle").AsVector2();
+                    mat.SetShaderParameter("light_angle", cur.Lerp(rel, 0.2f));
+                }
+                catch
+                {
+                    mat.SetShaderParameter("light_angle", rel);
+                }
+            }
+            catch { }
         }
         catch { }
     }
