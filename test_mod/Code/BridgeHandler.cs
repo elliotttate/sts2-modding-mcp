@@ -3988,171 +3988,16 @@ public static class BridgeHandler
 
     // ─── Auto-Rotate ─────────────────────────────────────────────────────
 
-    private static bool _autoRotate = false;
-    private static float _autoRotateAngle = 0f;
-    private static float _autoRotateSpeed = 2f;
-    private static int _autoRotateDebug = 0; // degrees per tick
-
     private static object StartAutoRotate()
     {
-        _autoRotate = true;
-        _autoRotateAngle = 0f;
-        ModEntry.WriteLog("[AutoRotate] Started");
-
-        // Start a background task that calls FindCards repeatedly
-        System.Threading.Tasks.Task.Run(async () =>
-        {
-            var emptyJson = System.Text.Json.JsonDocument.Parse("{\"params\":{}}").RootElement;
-            while (_autoRotate)
-            {
-                try
-                {
-                    // Mouse-driven tilt: cache mouse position then update cards
-                    MainThreadDispatcher.Post(() =>
-                    {
-                        try
-                        {
-                            // Get mouse pos on main thread
-                            var screenMouse = DisplayServer.MouseGetPosition();
-                            var winPos = DisplayServer.WindowGetPosition();
-                            _cachedMousePos = new Vector2(screenMouse.X - winPos.X, screenMouse.Y - winPos.Y);
-
-                            var tree = GodotEngine.GetMainLoop() as SceneTree;
-                            if (tree?.Root == null) return;
-                            AutoRotateCards(tree.Root);
-                        }
-                        catch { }
-                    });
-                }
-                catch { }
-                await System.Threading.Tasks.Task.Delay(33); // ~30fps
-            }
-            ModEntry.WriteLog("[AutoRotate] Stopped");
-        });
-
-        return new { success = true, status = "started" };
+        ModEntry.WriteLog("[AutoRotate] start_auto_rotate is deprecated; forwarding to foil tilt.");
+        return StartFoilTilt();
     }
 
     private static object StopAutoRotate()
     {
-        _autoRotate = false;
-
-        // Reset all cards to normal
-        MainThreadDispatcher.Post(() =>
-        {
-            try
-            {
-                var tree = GodotEngine.GetMainLoop() as SceneTree;
-                if (tree?.Root == null) return;
-                ResetCardScale(tree.Root);
-            }
-            catch { }
-        });
-
-        return new { success = true, status = "stopped" };
-    }
-
-    // Cached mouse position for the current frame (set once per tick)
-    private static Vector2 _cachedMousePos;
-
-    private static void AutoRotateCards(Node node)
-    {
-        if (node is MegaCrit.Sts2.Core.Nodes.Cards.NCard && node is Control ctrl)
-        {
-            try
-            {
-                var body = ctrl.GetNodeOrNull<Control>("%CardContainer");
-                if (body == null) goto recurse;
-
-                // Card rect: use NCard's GlobalPosition as the card's CENTER point.
-                // The parent NCardHolder's scale determines the visual card size.
-                // Base card is 300x422. The holder scales it (0.8 for grid, 1.0+ for hover).
-                var cardCenter = ctrl.GlobalPosition;
-                float holderScale = 1.0f;
-                try
-                {
-                    var holder = ctrl.GetParent();
-                    if (holder is Control holderCtrl)
-                        holderScale = Mathf.Max(holderCtrl.Scale.X, holderCtrl.Scale.Y);
-                }
-                catch { }
-                if (holderScale < 0.1f) holderScale = 0.8f;
-
-                float hw = 150 * holderScale;  // half width
-                float hh = 211 * holderScale;  // half height
-                var rect = new Rect2(cardCenter.X - hw, cardCenter.Y - hh, hw * 2, hh * 2);
-
-                // Mouse position relative to card center, normalized -1..1
-                var center = rect.Position + rect.Size * 0.5f;
-                var rel = (_cachedMousePos - center) / (rect.Size * 0.5f);
-                rel = rel.Clamp(new Vector2(-1.5f, -1.5f), new Vector2(1.5f, 1.5f));
-
-                // Detect hover by checking the card holder's _isHovered field
-                // or by checking if the NCard's parent holder scale is larger (hover = zoomed)
-                bool mouseOver = false;
-                try
-                {
-                    var parent = ctrl.GetParent();
-                    if (parent != null)
-                    {
-                        // NCardHolder has _isHovered — read via reflection
-                        var hoveredField = parent.GetType().GetField("_isHovered",
-                            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                        if (hoveredField != null)
-                            mouseOver = (bool)hoveredField.GetValue(parent)!;
-                    }
-                }
-                catch { }
-
-                // Fallback: check if scale is larger than default (hovered cards zoom up)
-                if (!mouseOver)
-                {
-                    try
-                    {
-                        var parentScale = ctrl.GetParent<Control>()?.Scale ?? Vector2.One;
-                        mouseOver = parentScale.X > 0.95f; // hovered cards are ~1.0-1.1, non-hovered ~0.8
-                    }
-                    catch { }
-                }
-
-                float proximity = mouseOver ? 1.0f : 0.0f;
-
-                // Physical tilt is now handled entirely by the vertex shader
-                // in the foil material via tilt_x/tilt_y uniforms.
-                // No Scale/skew needed — shader params persist through Post().
-
-                // Update foil shader — drives rainbow shift and sparkle based on tilt
-                if (body.Material is ShaderMaterial foilMat)
-                {
-                    // Use full relative position for the foil (not just X tilt)
-                    // so the rainbow/sparkle shifts as mouse moves in any direction
-                    float foilTiltX = rel.X * proximity;
-                    float foilTiltY = rel.Y * proximity;
-                    try
-                    {
-                        float cx = (float)foilMat.GetShaderParameter("tilt_x").AsDouble();
-                        float cy = (float)foilMat.GetShaderParameter("tilt_y").AsDouble();
-                        foilMat.SetShaderParameter("tilt_x", Mathf.Lerp(cx, foilTiltX, 0.15f));
-                        foilMat.SetShaderParameter("tilt_y", Mathf.Lerp(cy, foilTiltY, 0.15f));
-                    }
-                    catch
-                    {
-                        foilMat.SetShaderParameter("tilt_x", foilTiltX);
-                        foilMat.SetShaderParameter("tilt_y", foilTiltY);
-                    }
-                }
-            }
-            catch { }
-        }
-
-        recurse:
-
-        int count;
-        try { count = node.GetChildCount(); } catch { return; }
-        for (int i = 0; i < count; i++)
-        {
-            try { AutoRotateCards(node.GetChild(i)); } catch { }
-        }
+        ModEntry.WriteLog("[AutoRotate] stop_auto_rotate is deprecated; forwarding to foil tilt.");
+        return StopFoilTilt();
     }
 
     private static void SetUseParentOnChildren(Node parent)
@@ -4182,11 +4027,7 @@ public static class BridgeHandler
     {
         if (node is MegaCrit.Sts2.Core.Nodes.Cards.NCard && node is Control ctrl)
         {
-            var body = ctrl.GetNodeOrNull<Control>("%CardContainer");
-            if (body != null)
-            {
-                body.Scale = new Vector2(1.0f, 1.0f);
-            }
+            ResetCardTilt(ctrl);
         }
 
         int count;
@@ -4371,6 +4212,18 @@ void fragment() {
     private static object StopFoilTilt()
     {
         _foilTiltRunning = false;
+
+        MainThreadDispatcher.Post(() =>
+        {
+            try
+            {
+                var tree = GodotEngine.GetMainLoop() as SceneTree;
+                if (tree?.Root == null) return;
+                ResetCardScale(tree.Root);
+            }
+            catch { }
+        });
+
         return new { success = true, status = "stopped" };
     }
 
@@ -4378,11 +4231,10 @@ void fragment() {
 
     private static void RefreshCardList()
     {
-        // Only rebuild if empty — find_cards populates this too
-        if (_knownCardIds.Count > 0) return;
-
         var tree = GodotEngine.GetMainLoop() as SceneTree;
         if (tree?.Root == null) return;
+
+        _knownCardIds.Clear();
         CollectCardIds(tree.Root);
     }
 
@@ -4418,10 +4270,17 @@ void fragment() {
                 // Get card rect from CardContainer (Body)
                 var body = card.GetNodeOrNull<Control>("%CardContainer");
                 var portrait = card.GetNodeOrNull<TextureRect>("%Portrait");
-                if (portrait == null || !portrait.Visible) continue;
+                if (body == null || portrait == null || !portrait.Visible)
+                {
+                    ResetCardTilt(card);
+                    continue;
+                }
 
-                var rect = body != null ? body.GetGlobalRect() : portrait.GetGlobalRect();
+                var rect = body.GetGlobalRect();
                 if (rect.Size.X < 1 || rect.Size.Y < 1) continue;
+
+                float halfWidth = body.Size.X > 1f ? body.Size.X * 0.5f : 150f;
+                float halfHeight = body.Size.Y > 1f ? body.Size.Y * 0.5f : 211f;
 
                 var center = rect.Position + rect.Size * 0.5f;
                 var rel = (mousePos - center) / (rect.Size * 0.5f);
@@ -4443,22 +4302,37 @@ void fragment() {
 
                 // 3D Y-axis tilt via Scale.X on CardContainer
                 // Scale.X = cos(tilt_angle) simulates rotation around vertical axis
-                if (body != null)
-                {
-                    // Mouse X position drives the tilt angle (max ~20 degrees)
-                    float tiltAngle = rel.X * 20.0f * prox; // degrees
-                    float tiltRad = tiltAngle * Mathf.Pi / 180.0f;
-                    float targetScaleX = Mathf.Cos(tiltRad);
+                float tiltAngle = rel.X * FoilMaxTilt * prox;
+                float tiltRad = tiltAngle * Mathf.Pi / 180.0f;
+                float targetScaleX = Mathf.Cos(tiltRad);
+                float targetPivotX = Mathf.Clamp(halfWidth - tiltAngle * 3.0f, 0f, halfWidth * 2.0f);
 
-                    // Smooth lerp current scale toward target
-                    float curScaleX = body.Scale.X;
-                    float newScaleX = Mathf.Lerp(curScaleX, targetScaleX, 0.15f);
+                float currentPivotX = body.PivotOffset.X == 0f ? halfWidth : body.PivotOffset.X;
+                float currentPivotY = body.PivotOffset.Y == 0f ? halfHeight : body.PivotOffset.Y;
+                float newScaleX = Mathf.Lerp(body.Scale.X, targetScaleX, FoilTiltLerp);
+                float newPivotX = Mathf.Lerp(currentPivotX, targetPivotX, FoilTiltLerp);
+                float newPivotY = Mathf.Lerp(currentPivotY, halfHeight, FoilTiltLerp);
 
-                    body.PivotOffset = new Vector2(150, 211); // card center
-                    body.Scale = new Vector2(newScaleX, 1.0f);
-                }
+                body.PivotOffset = new Vector2(newPivotX, newPivotY);
+                body.Scale = new Vector2(newScaleX, 1.0f);
             }
             catch { }
         }
+    }
+
+    private static void ResetCardTilt(Control card)
+    {
+        card.PivotOffset = new Vector2(150f, 211f);
+        card.Scale = Vector2.One;
+
+        var body = card.GetNodeOrNull<Control>("%CardContainer");
+        if (body == null)
+            return;
+
+        float halfWidth = body.Size.X > 1f ? body.Size.X * 0.5f : 150f;
+        float halfHeight = body.Size.Y > 1f ? body.Size.Y * 0.5f : 211f;
+
+        body.PivotOffset = new Vector2(halfWidth, halfHeight);
+        body.Scale = Vector2.One;
     }
 }

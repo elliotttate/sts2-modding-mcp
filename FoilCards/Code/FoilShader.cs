@@ -3,68 +3,13 @@ using Godot;
 namespace FoilCards;
 
 /// <summary>
-/// Shaders for the 3D card effect.
-///
-/// TiltShader: Applied to SubViewportContainer — does perspective warp on the
-/// entire card texture (frame, art, text, everything as one image).
-///
-/// FoilShader: Applied to the card portrait — holographic rainbow effect.
+/// Holographic foil rainbow shader for card portraits.
+/// Applied to the Portrait TextureRect — adds rainbow streaks and gloss
+/// that shift based on the light_angle uniform (driven by mouse position).
+/// 3D tilt is handled separately via Scale.X on CardContainer (in bridge).
 /// </summary>
 public static class FoilShader
 {
-    // ─── Perspective tilt shader (for SubViewportContainer) ────────────────
-
-    private static Shader? _tiltShader;
-
-    private const string TiltCode = @"
-shader_type canvas_item;
-uniform float tilt_x = 0.0;
-uniform float tilt_y = 0.0;
-
-void vertex() {
-    // Perspective warp — shift vertices based on their position
-    // relative to card center. Creates trapezoid distortion.
-    vec2 center = vec2(150.0, 211.0); // half card size
-    vec2 offset = VERTEX - center;
-    vec2 norm = offset / center; // -1..1
-
-    float persp = 1.0 + norm.x * tilt_x + norm.y * tilt_y * 0.5;
-    persp = max(persp, 0.2);
-
-    VERTEX = vec2(offset.x / persp, offset.y / persp) + center;
-}
-
-void fragment() {
-    vec4 col = texture(TEXTURE, UV);
-    // Directional lighting — near side brighter, far side darker
-    vec2 norm = UV - 0.5;
-    float facing = clamp(1.0 + norm.x * tilt_x * 0.4, 0.8, 1.2);
-    col.rgb *= facing;
-    COLOR = col;
-}
-";
-
-    public static Shader GetTiltShader()
-    {
-        if (_tiltShader == null)
-        {
-            _tiltShader = new Shader();
-            _tiltShader.Code = TiltCode;
-        }
-        return _tiltShader;
-    }
-
-    public static ShaderMaterial CreateTiltMaterial()
-    {
-        var mat = new ShaderMaterial();
-        mat.Shader = GetTiltShader();
-        mat.SetShaderParameter("tilt_x", 0f);
-        mat.SetShaderParameter("tilt_y", 0f);
-        return mat;
-    }
-
-    // ─── Foil rainbow shader (for portrait TextureRect) ───────────────────
-
     private static Shader? _foilShader;
 
     private const string FoilCode = @"

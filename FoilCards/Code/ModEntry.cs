@@ -8,14 +8,11 @@ using MegaCrit.Sts2.Core.Nodes.Cards;
 namespace FoilCards;
 
 /// <summary>
-/// FoilCards mod — adds holographic foil + 3D perspective tilt to all cards.
+/// FoilCards mod — holographic foil + 3D card tilt for Slay the Spire 2.
 ///
-/// Architecture (inspired by chaofan's 3dcardeffects for STS1):
-/// - Wraps each card's CardContainer in a SubViewport so the entire card
-///   (frame, art, text, icons) renders as a single texture
-/// - Applies a perspective vertex shader to the SubViewportContainer
-///   which warps ALL pixels together — true 3D trapezoid tilt
-/// - Also applies a foil rainbow shader to the portrait art
+/// - Applies a foil rainbow shader to the portrait TextureRect
+/// - Continuously tilts all cards via Scale.X on the NCard root
+/// - Self-contained: no bridge dependency needed
 /// </summary>
 [ModInitializer("Init")]
 public static class ModEntry
@@ -23,17 +20,20 @@ public static class ModEntry
     private static int _setupCount = 0;
     private static readonly HashSet<ulong> _processedCards = new();
 
-    // Card dimensions from the scene file
     private const int CardWidth = 300;
     private const int CardHeight = 422;
+
+    // Tilt animation state
+    private static float _tiltAngle = 0f;
+    private static float _tiltSpeed = 1.5f; // radians per second
 
     public static void Init()
     {
         try
         {
-            Log.Warn("[FoilCards] Init — clean build with SubViewport approach.");
+            Log.Warn("[FoilCards] Init — foil shader + self-contained tilt.");
 
-            // Background thread: find NCards and set up SubViewport wrapping
+            // Setup loop: discover new cards and apply foil shader (slower, every 500ms)
             System.Threading.Tasks.Task.Run(async () =>
             {
                 await System.Threading.Tasks.Task.Delay(3000);
@@ -51,22 +51,22 @@ public static class ModEntry
                 }
             });
 
-            // Auto-start rotation via bridge after delay
+            // Tilt loop: animate all cards at ~30fps
             System.Threading.Tasks.Task.Run(async () =>
             {
-                await System.Threading.Tasks.Task.Delay(6000);
-                try
+                await System.Threading.Tasks.Task.Delay(4000);
+                Log.Warn("[FoilCards] Tilt loop running.");
+                while (true)
                 {
-                    var client = new System.Net.Sockets.TcpClient("127.0.0.1", 21337);
-                    var json = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"start_auto_rotate\"}";
-                    var data = System.Text.Encoding.UTF8.GetBytes(json + "\n");
-                    client.GetStream().Write(data, 0, data.Length);
-                    client.Close();
-                    Log.Warn("[FoilCards] Auto-rotate started via bridge.");
-                }
-                catch (Exception ex)
-                {
-                    Log.Warn($"[FoilCards] Could not start auto-rotate: {ex.Message}");
+                    try
+                    {
+                        _tiltAngle += _tiltSpeed * 0.033f;
+                        var tree = Engine.GetMainLoop() as SceneTree;
+                        if (tree?.Root != null)
+                            WalkAndTilt(tree.Root);
+                    }
+                    catch { }
+                    await System.Threading.Tasks.Task.Delay(33); // ~30fps
                 }
             });
 
@@ -77,6 +77,8 @@ public static class ModEntry
             Log.Warn($"[FoilCards] ERROR: {ex}");
         }
     }
+
+    // ─── Setup: find NCards and apply foil shader to portraits ────────────
 
     private static void WalkAndSetup(Node node)
     {
@@ -99,7 +101,6 @@ public static class ModEntry
             var id = card.GetInstanceId();
             if (_processedCards.Contains(id)) return;
 
-            // Apply foil shader to portrait
             var portrait = card.GetNodeOrNull<TextureRect>("%Portrait");
             if (portrait != null && portrait.Visible && portrait.Texture != null && portrait.Material == null)
             {
@@ -112,6 +113,52 @@ public static class ModEntry
             _processedCards.Add(id);
         }
         catch { }
+    }
+
+    // ─── Tilt: animate Scale.X on NCard root for 3D card tilt ────────────
+
+    private static void WalkAndTilt(Node node)
+    {
+        if (node is NCard && node is Control ctrl)
+        {
+            try
+            {
+                TiltCard(ctrl);
+            }
+            catch { }
+        }
+
+        int count;
+        try { count = node.GetChildCount(); } catch { return; }
+        for (int i = 0; i < count; i++)
+        {
+            try { WalkAndTilt(node.GetChild(i)); } catch { }
+        }
+    }
+
+    private static void TiltCard(Control ctrl)
+    {
+        // Tilt: sin wave drives direction, cos gives foreshortening
+        float tilt = (float)Math.Sin(_tiltAngle); // -1 to +1
+        float tiltDeg = tilt * 30.0f; // ±30 degrees
+        float tiltRad = tiltDeg * (float)Math.PI / 180.0f;
+        float scaleX = (float)Math.Cos(tiltRad); // narrowing (0.87 ↔ 1.0)
+        float lean = tilt * 2.0f * (float)Math.PI / 180.0f; // ±2° rotation for direction
+
+        ctrl.SetDeferred("pivot_offset", new Vector2(150, 211));
+        ctrl.SetDeferred("scale", new Vector2(scaleX, 1.0f));
+        ctrl.SetDeferred("rotation", lean);
+
+        // Update foil shader on portrait — rainbow shifts with tilt direction
+        var portrait = ctrl.GetNodeOrNull<TextureRect>("%Portrait");
+        if (portrait?.Material is ShaderMaterial foilMat)
+        {
+            var lightAngle = new Vector2(
+                (float)Math.Sin(_tiltAngle),
+                (float)Math.Cos(_tiltAngle)
+            );
+            foilMat.SetShaderParameter("light_angle", lightAngle);
+        }
     }
 
     public static void ApplyFoilToAllCards() { }
