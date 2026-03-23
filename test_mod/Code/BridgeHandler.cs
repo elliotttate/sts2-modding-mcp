@@ -3944,7 +3944,12 @@ public static class BridgeHandler
             }
             catch { }
 
-            // doRotate is no longer used — tilt is driven by mouse via light_angle
+            if (doRotate)
+            {
+                ctrl.PivotOffset = ctrl.Size * 0.5f;
+                ctrl.RotationDegrees = rotation;
+                info["rotation_set"] = rotation;
+            }
 
             results.Add(info);
         }
