@@ -11,14 +11,14 @@ public static class FoilShader
 shader_type canvas_item;
 
 uniform vec2 light_angle = vec2(0.0, 0.0);
-uniform float intensity : hint_range(0.0, 1.0) = 0.5;
+uniform float intensity : hint_range(0.0, 1.0) = 0.8;
 uniform float streak_density : hint_range(2.0, 20.0) = 7.0;
 uniform float scroll_speed : hint_range(0.0, 6.0) = 2.5;
 uniform float noise_scale : hint_range(2.0, 30.0) = 10.0;
 uniform float noise_anim_speed : hint_range(0.0, 3.0) = 0.6;
 uniform float gloss_power : hint_range(4.0, 128.0) = 20.0;
-uniform float gloss_strength : hint_range(0.0, 1.5) = 0.5;
-uniform float tilt_strength : hint_range(0.0, 1.0) = 0.45;
+uniform float gloss_strength : hint_range(0.0, 1.5) = 0.8;
+uniform float tilt_strength : hint_range(0.0, 1.0) = 0.6;
 
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float noise(vec2 p) {
@@ -100,14 +100,14 @@ void fragment() {
         var mat = new ShaderMaterial();
         mat.Shader = GetShader();
         mat.SetShaderParameter("light_angle", new Vector2(0f, 0f));
-        mat.SetShaderParameter("intensity", 0.5f);
+        mat.SetShaderParameter("intensity", 0.8f);
         mat.SetShaderParameter("streak_density", 7.0f);
         mat.SetShaderParameter("scroll_speed", 2.5f);
         mat.SetShaderParameter("noise_scale", 10.0f);
         mat.SetShaderParameter("noise_anim_speed", 0.6f);
         mat.SetShaderParameter("gloss_power", 20.0f);
-        mat.SetShaderParameter("gloss_strength", 0.5f);
-        mat.SetShaderParameter("tilt_strength", 0.45f);
+        mat.SetShaderParameter("gloss_strength", 0.8f);
+        mat.SetShaderParameter("tilt_strength", 0.6f);
         return mat;
     }
 
