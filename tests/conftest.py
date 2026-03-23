@@ -13,10 +13,21 @@ DECOMPILED_DIR = os.environ.get(
     "STS2_DECOMPILED_DIR",
     str(PROJECT_ROOT / "decompiled"),
 )
-GAME_DIR = os.environ.get(
-    "STS2_GAME_DIR",
-    r"E:\SteamLibrary\steamapps\common\Slay the Spire 2",
-)
+def _find_game_dir() -> str:
+    """Resolve game dir from env var or auto-detection, falling back to empty string."""
+    env = os.environ.get("STS2_GAME_DIR")
+    if env:
+        return env
+    try:
+        from sts2mcp.setup import find_game_install
+        found = find_game_install()
+        if found:
+            return found
+    except Exception:
+        pass
+    return ""
+
+GAME_DIR = _find_game_dir()
 
 # Conditions
 HAS_DECOMPILED = Path(DECOMPILED_DIR).exists() and any(Path(DECOMPILED_DIR).iterdir())

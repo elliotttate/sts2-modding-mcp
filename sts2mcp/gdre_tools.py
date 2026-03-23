@@ -12,28 +12,51 @@ import os
 import subprocess
 from pathlib import Path
 
+# Timeouts (seconds)
+GDRE_DEFAULT_TIMEOUT = 300   # 5 minutes — listing, decompile, convert
+GDRE_EXTRACT_TIMEOUT = 600   # 10 minutes — extract / recover
 
-# Path to gdre_tools binary — override via env var
-GDRE_TOOLS_PATH = os.environ.get(
-    "GDRE_TOOLS_PATH",
-    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools", "gdre_tools.exe"),
-)
+# Result truncation limits
+MAX_ASSET_LIST_RESULTS = 2000
+MAX_SEARCH_RESULTS = 500
+MAX_STDOUT_CHARS = 2000
+MAX_STDOUT_CHARS_LONG = 4000  # for decompile/convert output
+
+# Default path to gdre_tools binary (relative to project root)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_DEFAULT_GDRE_PATH = str(_PROJECT_ROOT / "tools" / "gdre_tools.exe")
 
 # Caches
 _game_pck_cache: str | None = None
 _asset_list_cache: list[str] | None = None
 
 
+def _resolve_gdre_path() -> str:
+    """Resolve gdre_tools path: env var → config file → default location."""
+    env = os.environ.get("GDRE_TOOLS_PATH")
+    if env:
+        return env
+    try:
+        from sts2mcp.setup import load_config
+        config_path = load_config().get("gdre_tools_path")
+        if config_path:
+            return config_path
+    except Exception:
+        pass
+    return _DEFAULT_GDRE_PATH
+
+
 def _find_gdre() -> str:
     """Locate gdre_tools binary, checking PATH as fallback."""
-    if os.path.isfile(GDRE_TOOLS_PATH):
-        return GDRE_TOOLS_PATH
+    resolved = _resolve_gdre_path()
+    if os.path.isfile(resolved):
+        return resolved
     import shutil
     found = shutil.which("gdre_tools")
     if found:
         return found
     raise FileNotFoundError(
-        f"gdre_tools not found at {GDRE_TOOLS_PATH} or on PATH. "
+        f"gdre_tools not found at {resolved} or on PATH. "
         "Run 'python -m sts2mcp.setup' to download automatically, or get it from "
         "https://github.com/GDRETools/gdsdecomp/releases"
     )
@@ -67,7 +90,7 @@ def _find_game_pck(game_dir: str) -> str:
     raise FileNotFoundError(f"No .pck file found in {game_dir}")
 
 
-def _run_gdre(args: list[str], timeout: int = 300) -> subprocess.CompletedProcess:
+def _run_gdre(args: list[str], timeout: int = GDRE_DEFAULT_TIMEOUT) -> subprocess.CompletedProcess:
     """Run gdre_tools with given arguments."""
     gdre = _find_gdre()
     cmd = [gdre, "--headless"] + args
@@ -143,8 +166,8 @@ def list_game_assets(game_dir: str, filter_glob: str = "", filter_ext: str = "")
         "pck_path": _game_pck_cache or "",
         "total_files": len(files),
         "extension_summary": sorted_exts,
-        "files": files[:2000],
-        "truncated": len(files) > 2000,
+        "files": files[:MAX_ASSET_LIST_RESULTS],
+        "truncated": len(files) > MAX_ASSET_LIST_RESULTS,
     }
 
 
@@ -185,8 +208,8 @@ def search_game_assets(game_dir: str, pattern: str, extensions: list[str] | None
         "success": True,
         "pattern": pattern,
         "match_count": len(matches),
-        "matches": matches[:500],
-        "truncated": len(matches) > 500,
+        "matches": matches[:MAX_SEARCH_RESULTS],
+        "truncated": len(matches) > MAX_SEARCH_RESULTS,
     }
 
 
@@ -223,11 +246,11 @@ def extract_game_assets(
         args.append("--scripts-only")
 
     try:
-        result = _run_gdre(args, timeout=600)
+        result = _run_gdre(args, timeout=GDRE_EXTRACT_TIMEOUT)
     except FileNotFoundError as e:
         return {"success": False, "error": str(e)}
     except subprocess.TimeoutExpired:
-        return {"success": False, "error": "Extraction timed out after 10 minutes"}
+        return {"success": False, "error": f"Extraction timed out after {GDRE_EXTRACT_TIMEOUT // 60} minutes"}
 
     if result.returncode != 0:
         return {"success": False, "error": result.stderr or result.stdout}
@@ -240,7 +263,7 @@ def extract_game_assets(
         "success": True,
         "output_dir": output_dir,
         "files_extracted": file_count,
-        "stdout": result.stdout[:2000] if result.stdout else "",
+        "stdout": result.stdout[:MAX_STDOUT_CHARS] if result.stdout else "",
     }
 
 
@@ -265,11 +288,11 @@ def recover_game_project(game_dir: str, output_dir: str) -> dict:
     args = ["--recover=" + pck_path, "--output=" + output_dir]
 
     try:
-        result = _run_gdre(args, timeout=600)
+        result = _run_gdre(args, timeout=GDRE_EXTRACT_TIMEOUT)
     except FileNotFoundError as e:
         return {"success": False, "error": str(e)}
     except subprocess.TimeoutExpired:
-        return {"success": False, "error": "Recovery timed out after 10 minutes"}
+        return {"success": False, "error": f"Recovery timed out after {GDRE_EXTRACT_TIMEOUT // 60} minutes"}
 
     if result.returncode != 0:
         return {"success": False, "error": result.stderr or result.stdout}
@@ -289,7 +312,7 @@ def recover_game_project(game_dir: str, output_dir: str) -> dict:
         "output_dir": output_dir,
         "total_files": file_count,
         "extension_summary": dict(sorted(ext_counts.items(), key=lambda x: -x[1])),
-        "stdout": result.stdout[:2000] if result.stdout else "",
+        "stdout": result.stdout[:MAX_STDOUT_CHARS] if result.stdout else "",
     }
 
 
@@ -322,7 +345,7 @@ def decompile_gdscript(
 
     return {
         "success": True,
-        "stdout": result.stdout[:4000] if result.stdout else "",
+        "stdout": result.stdout[:MAX_STDOUT_CHARS_LONG] if result.stdout else "",
     }
 
 
@@ -363,5 +386,5 @@ def convert_resource(
 
     return {
         "success": True,
-        "stdout": result.stdout[:4000] if result.stdout else "",
+        "stdout": result.stdout[:MAX_STDOUT_CHARS_LONG] if result.stdout else "",
     }

@@ -265,9 +265,10 @@ def run_decompile(game_dir: str, decompiled_dir: str | None = None) -> dict:
 def check_gdre_tools() -> dict:
     """Check if GDRE Tools binary is available."""
     env_path = os.environ.get("GDRE_TOOLS_PATH")
+    config_path = load_config().get("gdre_tools_path")
     default_path = TOOLS_DIR / "gdre_tools.exe"
 
-    for p in [env_path, str(default_path)]:
+    for p in [env_path, config_path, str(default_path)]:
         if p and os.path.isfile(p):
             return {"installed": True, "path": p}
 
@@ -400,8 +401,11 @@ def resolve_config() -> tuple[str, str]:
         os.environ.get("STS2_GAME_DIR")
         or config.get("game_dir")
         or find_game_install()
-        or r"E:\SteamLibrary\steamapps\common\Slay the Spire 2"
     )
+    if not game_dir:
+        raise FileNotFoundError(
+            "Could not locate Slay the Spire 2. Set STS2_GAME_DIR or run 'python -m sts2mcp.setup'."
+        )
 
     decompiled_dir = (
         os.environ.get("STS2_DECOMPILED_DIR")

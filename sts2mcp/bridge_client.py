@@ -9,6 +9,8 @@ from typing import Any, Optional, Sequence
 BRIDGE_HOST = "127.0.0.1"
 BRIDGE_PORT = 21337
 TIMEOUT = 12.0  # Must exceed MainThreadDispatcher.Invoke's 10s timeout
+MAX_RESPONSE_SIZE = 10 * 1024 * 1024  # 10 MB
+RECV_BUFFER_SIZE = 4096
 _ACTION_REQUIREMENTS = {
     "event_option": ("choice_index",),
     "map_travel": ("row", "col"),
@@ -37,16 +39,15 @@ def send_request(method: str, params: dict | None = None, request_id: int = 1) -
             payload = json.dumps(request) + "\n"
             sock.sendall(payload.encode("utf-8"))
 
-            # Read response (newline-delimited, max 10MB)
+            # Read response (newline-delimited)
             data = b""
-            max_size = 10 * 1024 * 1024
             while True:
-                chunk = sock.recv(4096)
+                chunk = sock.recv(RECV_BUFFER_SIZE)
                 if not chunk:
                     break
                 data += chunk
-                if len(data) > max_size:
-                    return {"error": f"Bridge response exceeded {max_size} bytes"}
+                if len(data) > MAX_RESPONSE_SIZE:
+                    return {"error": f"Bridge response exceeded {MAX_RESPONSE_SIZE} bytes"}
                 if b"\n" in data or b"\r" in data:
                     break
 
