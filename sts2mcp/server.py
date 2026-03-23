@@ -1585,15 +1585,17 @@ async def list_tools() -> list[types.Tool]:
             description=(
                 "Navigate the main menu programmatically. Works even when the game window is not focused. "
                 "Targets: 'continue' (resume saved run), 'compendium' (open compendium submenu), "
-                "'card_library' (open card library directly), 'new_run' (open character select), "
-                "'abandon' (abandon current run), 'back' (pop current submenu)."
+                "'card_library' (open card library directly), 'settings' (open settings screen), "
+                "'profile' (open profile screen), 'timeline' (open timeline screen), "
+                "'multiplayer' (open multiplayer submenu), 'new_run' (open character select), "
+                "'abandon' (abandon current run), 'back' (pop current submenu / dismiss popup)."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "target": {
                         "type": "string",
-                        "enum": ["continue", "compendium", "card_library", "new_run", "abandon", "back"],
+                        "enum": ["continue", "compendium", "card_library", "settings", "profile", "timeline", "multiplayer", "new_run", "abandon", "back"],
                         "description": "Menu target to navigate to",
                     },
                 },

@@ -516,7 +516,7 @@ def navigate_menu(target: str) -> dict:
     """Navigate main menu programmatically. Works even when game isn't focused.
 
     Args:
-        target: "continue" | "compendium" | "card_library" | "new_run" | "abandon" | "back"
+        target: "continue" | "compendium" | "card_library" | "settings" | "profile" | "timeline" | "multiplayer" | "new_run" | "abandon" | "back"
     """
     return send_request("navigate_menu", {"target": target})
 

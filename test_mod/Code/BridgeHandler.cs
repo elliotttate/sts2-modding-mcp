@@ -3593,7 +3593,7 @@ public static class BridgeHandler
         try
         {
             if (!root.TryGetProperty("params", out var p) || !p.TryGetProperty("target", out var targetProp))
-                return new { error = "navigate_menu requires params.target (continue, compendium, card_library, new_run, abandon, back)" };
+                return new { error = "navigate_menu requires params.target (continue, compendium, card_library, settings, profile, timeline, multiplayer, new_run, abandon, back)" };
 
             var target = (targetProp.GetString() ?? "").Trim().ToLowerInvariant();
 
@@ -3613,6 +3613,10 @@ public static class BridgeHandler
                 {
                     if (mainMenu == null)
                         return new { error = "Not on main menu" };
+
+                    // Check if there's actually a save to continue
+                    if (!RunManager.Instance.IsInProgress)
+                        return new { error = "No saved run to continue" };
 
                     // Call the private OnContinueButtonPressed method
                     var method = mainMenu.GetType().GetMethod("OnContinueButtonPressed",
@@ -3694,6 +3698,109 @@ public static class BridgeHandler
                     return new { success = true, target, invoked = "PushSubmenuType<NCardLibrary>" };
                 }
 
+                case "settings":
+                {
+                    if (mainMenu == null)
+                        return new { error = "Not on main menu" };
+
+                    var stackProp = mainMenu.GetType().GetProperty("SubmenuStack",
+                        BindingFlags.Public | BindingFlags.Instance);
+                    var stack = stackProp?.GetValue(mainMenu);
+                    if (stack == null)
+                        return new { error = "Could not access SubmenuStack" };
+
+                    var settingsType = Type.GetType("MegaCrit.Sts2.Core.Nodes.Screens.Settings.NSettingsScreen, sts2")
+                        ?? Type.GetType("MegaCrit.Sts2.Core.Nodes.Screens.MainMenu.NSettingsScreen, sts2");
+                    if (settingsType == null)
+                        return new { error = "Could not find NSettingsScreen type" };
+
+                    var pushMethod = stack.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                        .FirstOrDefault(m => m.Name == "PushSubmenuType" && m.IsGenericMethod && m.GetParameters().Length == 0);
+                    if (pushMethod == null)
+                        return new { error = "Could not find PushSubmenuType method" };
+
+                    pushMethod.MakeGenericMethod(settingsType).Invoke(stack, null);
+                    ModEntry.WriteLog("[navigate_menu] PushSubmenuType<NSettingsScreen>");
+                    return new { success = true, target, invoked = "PushSubmenuType<NSettingsScreen>" };
+                }
+
+                case "profile":
+                {
+                    if (mainMenu == null)
+                        return new { error = "Not on main menu" };
+
+                    var stackProp = mainMenu.GetType().GetProperty("SubmenuStack",
+                        BindingFlags.Public | BindingFlags.Instance);
+                    var stack = stackProp?.GetValue(mainMenu);
+                    if (stack == null)
+                        return new { error = "Could not access SubmenuStack" };
+
+                    var profileType = Type.GetType("MegaCrit.Sts2.Core.Nodes.Screens.ProfileScreen.NProfileScreen, sts2")
+                        ?? Type.GetType("MegaCrit.Sts2.Core.Nodes.Screens.Profile.NProfileScreen, sts2");
+                    if (profileType == null)
+                        return new { error = "Could not find NProfileScreen type" };
+
+                    var pushMethod = stack.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                        .FirstOrDefault(m => m.Name == "PushSubmenuType" && m.IsGenericMethod && m.GetParameters().Length == 0);
+                    if (pushMethod == null)
+                        return new { error = "Could not find PushSubmenuType method" };
+
+                    pushMethod.MakeGenericMethod(profileType).Invoke(stack, null);
+                    ModEntry.WriteLog("[navigate_menu] PushSubmenuType<NProfileScreen>");
+                    return new { success = true, target, invoked = "PushSubmenuType<NProfileScreen>" };
+                }
+
+                case "timeline":
+                {
+                    if (mainMenu == null)
+                        return new { error = "Not on main menu" };
+
+                    var stackProp = mainMenu.GetType().GetProperty("SubmenuStack",
+                        BindingFlags.Public | BindingFlags.Instance);
+                    var stack = stackProp?.GetValue(mainMenu);
+                    if (stack == null)
+                        return new { error = "Could not access SubmenuStack" };
+
+                    var timelineType = Type.GetType("MegaCrit.Sts2.Core.Nodes.Screens.Timeline.NTimelineScreen, sts2")
+                        ?? Type.GetType("MegaCrit.Sts2.Core.Nodes.Screens.MainMenu.NTimelineScreen, sts2");
+                    if (timelineType == null)
+                        return new { error = "Could not find NTimelineScreen type" };
+
+                    var pushMethod = stack.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                        .FirstOrDefault(m => m.Name == "PushSubmenuType" && m.IsGenericMethod && m.GetParameters().Length == 0);
+                    if (pushMethod == null)
+                        return new { error = "Could not find PushSubmenuType method" };
+
+                    pushMethod.MakeGenericMethod(timelineType).Invoke(stack, null);
+                    ModEntry.WriteLog("[navigate_menu] PushSubmenuType<NTimelineScreen>");
+                    return new { success = true, target, invoked = "PushSubmenuType<NTimelineScreen>" };
+                }
+
+                case "multiplayer":
+                {
+                    if (mainMenu == null)
+                        return new { error = "Not on main menu" };
+
+                    var stackProp = mainMenu.GetType().GetProperty("SubmenuStack",
+                        BindingFlags.Public | BindingFlags.Instance);
+                    var stack = stackProp?.GetValue(mainMenu);
+                    if (stack == null)
+                        return new { error = "Could not access SubmenuStack" };
+
+                    var mpType = Type.GetType("MegaCrit.Sts2.Core.Nodes.Screens.MainMenu.NMultiplayerSubmenu, sts2");
+                    if (mpType == null)
+                        return new { error = "Could not find NMultiplayerSubmenu type" };
+
+                    var pushMethod = stack.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                        .FirstOrDefault(m => m.Name == "PushSubmenuType" && m.IsGenericMethod && m.GetParameters().Length == 0);
+                    if (pushMethod == null)
+                        return new { error = "Could not find PushSubmenuType method" };
+
+                    pushMethod.MakeGenericMethod(mpType).Invoke(stack, null);
+                    ModEntry.WriteLog("[navigate_menu] PushSubmenuType<NMultiplayerSubmenu>");
+                    return new { success = true, target, invoked = "PushSubmenuType<NMultiplayerSubmenu>" };
+                }
+
                 case "new_run" or "new_game" or "singleplayer":
                 {
                     if (mainMenu == null)
@@ -3722,6 +3829,32 @@ public static class BridgeHandler
 
                 case "back":
                 {
+                    // First check if there's a popup overlay (e.g. NErrorPopup) — dismiss it
+                    var screenObj = GetActiveScreenObject();
+                    if (screenObj != null)
+                    {
+                        var screenTypeName = screenObj.GetType().Name;
+                        if (screenTypeName.Contains("Popup") || screenTypeName.Contains("Error") || screenTypeName.Contains("Dialog"))
+                        {
+                            // Try OnOkButtonPressed(NButton) or OnCancelButtonPressed(NButton)
+                            if (TryInvokeMethod(screenObj,
+                                    ["OnOkButtonPressed", "OnCancelButtonPressed", "Close", "Dismiss"],
+                                    [null],
+                                    out var dismissMethod))
+                            {
+                                ModEntry.WriteLog($"[navigate_menu] Dismissed popup via {dismissMethod} on {screenTypeName}");
+                                return new { success = true, target, invoked = dismissMethod, screen_type = screenTypeName };
+                            }
+                            // Fallback: QueueFree the popup node
+                            if (screenObj is Godot.Node popupNode)
+                            {
+                                popupNode.QueueFree();
+                                ModEntry.WriteLog($"[navigate_menu] QueueFree'd popup {screenTypeName}");
+                                return new { success = true, target, invoked = "QueueFree", screen_type = screenTypeName };
+                            }
+                        }
+                    }
+
                     if (mainMenu == null)
                         return new { error = "Not on main menu" };
 
@@ -3730,6 +3863,13 @@ public static class BridgeHandler
                     var stack = stackProp?.GetValue(mainMenu);
                     if (stack == null)
                         return new { error = "Could not access SubmenuStack" };
+
+                    // Check if stack has anything to pop
+                    var submenusOpenProp = stack.GetType().GetProperty("SubmenusOpen",
+                        BindingFlags.Public | BindingFlags.Instance);
+                    var submenusOpen = submenusOpenProp?.GetValue(stack) as bool? ?? true;
+                    if (!submenusOpen)
+                        return new { error = "Already on main menu (submenu stack is empty)" };
 
                     var popMethod = stack.GetType().GetMethod("Pop",
                         BindingFlags.Public | BindingFlags.Instance);
@@ -3745,8 +3885,15 @@ public static class BridgeHandler
                     if (screenObj == null)
                         return new { error = "No active screen object" };
 
-                    // Try common proceed/continue patterns
+                    // Try common proceed/continue patterns (0-arg methods)
                     if (TryInvokeMethod(screenObj, ["OpenSummaryScreen", "Proceed", "Continue", "Confirm", "Done", "Close", "Leave", "Accept", "Dismiss"], Array.Empty<object?>(), out var invokedMethod))
+                    {
+                        ModEntry.WriteLog($"[navigate_menu] proceed via {invokedMethod} on {screenObj.GetType().Name}");
+                        return new { success = true, target, invoked = invokedMethod, screen_type = screenObj.GetType().Name };
+                    }
+
+                    // Try popup dismiss methods that take an NButton parameter (e.g. OnOkButtonPressed(NButton _))
+                    if (TryInvokeMethod(screenObj, ["OnOkButtonPressed", "OnCancelButtonPressed", "OnCloseButtonPressed", "OnDismissButtonPressed"], [null], out invokedMethod))
                     {
                         ModEntry.WriteLog($"[navigate_menu] proceed via {invokedMethod} on {screenObj.GetType().Name}");
                         return new { success = true, target, invoked = invokedMethod, screen_type = screenObj.GetType().Name };
@@ -3777,7 +3924,7 @@ public static class BridgeHandler
                 }
 
                 default:
-                    return new { error = $"Unknown target: {target}. Valid: continue, compendium, card_library, new_run, abandon, back, proceed" };
+                    return new { error = $"Unknown target: {target}. Valid: continue, compendium, card_library, settings, profile, timeline, multiplayer, new_run, abandon, back, proceed" };
             }
         }
         catch (Exception ex) { return new { error = ex.Message }; }
