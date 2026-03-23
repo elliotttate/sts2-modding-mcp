@@ -15,10 +15,14 @@ these tools return `"Bridge not running"` errors.
 
 ## Building MCPTest
 
+Set `STS2_GAME_DIR` to your game install path, then build:
+
 ```bash
 cd test_mod
-dotnet build MCPTest.csproj -c Debug
+STS2_GAME_DIR="/path/to/Slay the Spire 2" dotnet build MCPTest.csproj -c Debug
 ```
+
+The csproj auto-detects the platform-specific data subfolder (Windows/Linux/macOS). You can also pass it directly: `dotnet build /p:Sts2GameDir="/path/to/game"`.
 
 The built DLL lands in `test_mod/.godot/mono/temp/bin/Debug/` or `test_mod/bin/Debug/`.
 

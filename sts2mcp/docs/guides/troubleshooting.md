@@ -29,11 +29,11 @@ Install .NET SDK 9.0 from https://dotnet.microsoft.com/download
 ## Build Issues
 
 ### "Build failed — assembly reference errors"
-The mod can't find sts2.dll. Check your `.csproj`:
-```xml
-<Sts2Dir>path\to\data_sts2_windows_x86_64</Sts2Dir>
+The mod can't find sts2.dll. Set the `STS2_GAME_DIR` environment variable to your game install path, or pass it to dotnet build:
+```bash
+dotnet build /p:Sts2GameDir="/path/to/Slay the Spire 2"
 ```
-This path must contain `sts2.dll`.
+The csproj auto-detects the platform-specific data subfolder (`data_sts2_windows_x86_64`, `data_sts2_linuxbsd_x86_64`, `data_sts2_macos_arm64`). The resolved path must contain `sts2.dll`.
 
 ### "Type or namespace not found"
 Common causes:
