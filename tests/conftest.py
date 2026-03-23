@@ -14,12 +14,15 @@ DECOMPILED_DIR = os.environ.get(
     str(PROJECT_ROOT / "decompiled"),
 )
 def _find_game_dir() -> str:
-    """Resolve game dir from env var or auto-detection, falling back to empty string."""
+    """Resolve game dir from env var, config file, or auto-detection."""
     env = os.environ.get("STS2_GAME_DIR")
     if env:
         return env
     try:
-        from sts2mcp.setup import find_game_install
+        from sts2mcp.setup import load_config, find_game_install
+        config_dir = load_config().get("game_dir")
+        if config_dir:
+            return config_dir
         found = find_game_install()
         if found:
             return found

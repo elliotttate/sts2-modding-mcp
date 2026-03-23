@@ -296,7 +296,7 @@ The `get_modding_guide` tool provides built-in documentation. The 12 new topics 
 - **[Python 3.11+](https://www.python.org/downloads/)** — check with `python --version`
 - **[.NET SDK 9.0](https://dotnet.microsoft.com/download/dotnet/9.0)** — for building mods, the Roslyn code analyzer, and decompilation
 - **[ilspycmd](https://www.nuget.org/packages/ilspycmd/)** — `dotnet tool install -g ilspycmd` (for C# decompilation)
-- **[GDRE Tools](https://github.com/GDRETools/gdsdecomp/releases)** — download the latest release and extract to `tools/` or set `GDRE_TOOLS_PATH` (for Godot asset extraction)
+- **[GDRE Tools](https://github.com/GDRETools/gdsdecomp/releases)** — download the latest release and extract to `tools/`, or let `python -m sts2mcp.setup` download it automatically (for Godot asset extraction)
 - **Slay the Spire 2** — the game itself
 
 ## Quick Start
@@ -372,19 +372,49 @@ unzip gdre_tools.zip
 rm gdre_tools.zip
 ```
 
-Or set the `GDRE_TOOLS_PATH` environment variable to point to your `gdre_tools` binary.
+Or set `gdre_tools_path` in `sts2mcp_config.json` (see [Configure paths](#4-configure-paths)) to point to your `gdre_tools` binary.
 
 The `list_game_assets` and `search_game_assets` tools will then automatically find and index `SlayTheSpire2.pck`. Use `recover_game_project` for a one-time full extraction with GDScript decompilation.
 
 ### 4. Configure paths
 
-By default the server looks for the game at `E:\SteamLibrary\steamapps\common\Slay the Spire 2`. If your game is installed elsewhere (most common: `C:\Program Files (x86)\Steam\steamapps\common\Slay the Spire 2`), override with environment variables:
+The server **auto-detects** your game installation on all platforms:
 
-```bash
-export STS2_GAME_DIR="/path/to/Slay the Spire 2"
-export STS2_DECOMPILED_DIR="/path/to/decompiled"
-export GDRE_TOOLS_PATH="/path/to/gdre_tools.exe"  # optional, defaults to tools/gdre_tools.exe
+- **Windows** — checks the registry, Steam's `libraryfolders.vdf`, and common library locations (`C:\Program Files (x86)\Steam`, plus drives C–J)
+- **Linux** — checks `~/.steam/steam`, `~/.local/share/Steam`, Flatpak, and Snap installs
+- **macOS** — checks `~/Library/Application Support/Steam`
+
+Running `python -m sts2mcp.setup` triggers auto-detection and saves the result to `sts2mcp_config.json` so you never need to configure it again.
+
+If auto-detection doesn't find your game (e.g. a non-Steam install), manually edit the config file at the project root:
+
+```json
+// sts2mcp_config.json — Windows example
+{
+  "game_dir": "D:\\Games\\Slay the Spire 2",
+  "decompiled_dir": "C:\\projects\\sts2-decompiled",
+  "gdre_tools_path": "C:\\tools\\gdre_tools.exe"
+}
 ```
+
+```json
+// sts2mcp_config.json — Linux/macOS example
+{
+  "game_dir": "/home/user/.steam/steam/steamapps/common/Slay the Spire 2",
+  "decompiled_dir": "/home/user/sts2-decompiled",
+  "gdre_tools_path": "/usr/local/bin/gdre_tools"
+}
+```
+
+All three keys are optional — only set the ones you need to override:
+
+| Key | What it points to | Default if omitted |
+|-----|-------------------|--------------------|
+| `game_dir` | Game install folder (contains `sts2.dll` / `sts2.so` / `sts2.dylib`) | Auto-detected from Steam |
+| `decompiled_dir` | Decompiled C# source output | `./decompiled` |
+| `gdre_tools_path` | GDRE Tools binary | `./tools/gdre_tools.exe` |
+
+The resolution order for each path is: **environment variable → config file → auto-detect/default**. Environment variables (`STS2_GAME_DIR`, `STS2_DECOMPILED_DIR`, `GDRE_TOOLS_PATH`) still work as highest-priority overrides, which is useful for CI or temporary testing.
 
 ### 5. Connect to an AI assistant
 

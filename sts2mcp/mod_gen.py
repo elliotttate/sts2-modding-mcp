@@ -176,8 +176,31 @@ def _build_hook_method_stub(hook_signature: dict, comment: str, include_flash: b
 class ModGenerator:
     def __init__(self, game_dir: str):
         self.game_dir = Path(game_dir)
-        self.data_dir = self.game_dir / "data_sts2_windows_x86_64"
+        self.data_dir = self._find_data_dir()
         self.mods_dir = self.game_dir / "mods"
+
+    def _find_data_dir(self) -> Path:
+        """Find the platform-specific data directory inside the game folder."""
+        import sys
+        prefixes = {
+            "win32": ["data_sts2_windows_x86_64"],
+            "linux": ["data_sts2_linuxbsd_x86_64", "data_sts2_linux_x86_64"],
+            "darwin": ["data_sts2_macos_x86_64", "data_sts2_macos_arm64"],
+        }
+        platform = sys.platform if sys.platform in prefixes else "linux"
+        for name in prefixes[platform]:
+            candidate = self.game_dir / name
+            if candidate.is_dir():
+                return candidate
+        # Fallback: find any data_sts2_* directory
+        try:
+            for d in self.game_dir.iterdir():
+                if d.is_dir() and d.name.startswith("data_sts2_"):
+                    return d
+        except OSError:
+            pass
+        # Last resort: return the Windows default (will fail gracefully later)
+        return self.game_dir / "data_sts2_windows_x86_64"
 
     def create_mod_project(
         self,

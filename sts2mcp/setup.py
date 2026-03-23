@@ -80,21 +80,37 @@ def save_config(config: dict) -> None:
 
 def _parse_steam_library_folders() -> list[str]:
     """Parse Steam's libraryfolders.vdf to find all library paths."""
-    # Find Steam root via common locations
-    steam_roots = [
+    # Find Steam root via common locations (platform-aware)
+    steam_roots: list[Path | None] = [
         Path(os.environ.get("STEAM_PATH", "")) if os.environ.get("STEAM_PATH") else None,
-        Path("C:/Program Files (x86)/Steam"),
-        Path("C:/Program Files/Steam"),
     ]
-    # Also check registry on Windows
-    try:
-        import winreg
-        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam")
-        steam_path, _ = winreg.QueryValueEx(key, "InstallPath")
-        winreg.CloseKey(key)
-        steam_roots.insert(0, Path(steam_path))
-    except Exception:
-        pass
+
+    if sys.platform == "win32":
+        steam_roots += [
+            Path("C:/Program Files (x86)/Steam"),
+            Path("C:/Program Files/Steam"),
+        ]
+        # Also check registry on Windows
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam")
+            steam_path, _ = winreg.QueryValueEx(key, "InstallPath")
+            winreg.CloseKey(key)
+            steam_roots.insert(0, Path(steam_path))
+        except Exception:
+            pass
+    elif sys.platform == "darwin":
+        steam_roots += [
+            Path.home() / "Library" / "Application Support" / "Steam",
+        ]
+    else:
+        # Linux and other Unix-like
+        steam_roots += [
+            Path.home() / ".steam" / "steam",
+            Path.home() / ".local" / "share" / "Steam",
+            Path.home() / ".steam" / "debian-installation",
+            Path("/usr/share/steam"),
+        ]
 
     paths: list[str] = []
     for root in steam_roots:
@@ -121,12 +137,41 @@ def _parse_steam_library_folders() -> list[str]:
     return paths
 
 
+# Platform-specific game binary paths (subfolder, filename)
+_GAME_BINARY_CANDIDATES = {
+    "win32": [("data_sts2_windows_x86_64", "sts2.dll")],
+    "linux": [("data_sts2_linuxbsd_x86_64", "sts2.so"), ("data_sts2_linux_x86_64", "sts2.so")],
+    "darwin": [("data_sts2_macos_x86_64", "sts2.dylib"), ("data_sts2_macos_arm64", "sts2.dylib")],
+}
+
+
+def find_game_binary(game_dir: str) -> str | None:
+    """Find the game binary (sts2.dll/.so/.dylib) inside a game directory. Returns path or None."""
+    platform = sys.platform if sys.platform in _GAME_BINARY_CANDIDATES else "linux"
+    for subfolder, binary in _GAME_BINARY_CANDIDATES[platform]:
+        p = os.path.join(game_dir, subfolder, binary)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
 def _check_game_at(library_path: str) -> str | None:
     """Check if STS2 is installed under a Steam library path. Returns game dir or None."""
     game_dir = os.path.join(library_path, "steamapps", "common", "Slay the Spire 2")
-    dll_path = os.path.join(game_dir, "data_sts2_windows_x86_64", "sts2.dll")
+    platform = sys.platform if sys.platform in _GAME_BINARY_CANDIDATES else "linux"
+    for subfolder, binary in _GAME_BINARY_CANDIDATES[platform]:
+        try:
+            if os.path.isfile(os.path.join(game_dir, subfolder, binary)):
+                return game_dir
+        except OSError:
+            pass
+    # Fallback: check if the game dir exists at all (might have different binary layout)
     try:
-        if os.path.isfile(dll_path):
+        if os.path.isdir(game_dir) and any(
+            f.endswith((".dll", ".so", ".dylib"))
+            for d in os.listdir(game_dir) if os.path.isdir(os.path.join(game_dir, d))
+            for f in os.listdir(os.path.join(game_dir, d))
+        ):
             return game_dir
     except OSError:
         pass
@@ -137,22 +182,31 @@ def find_game_install() -> str | None:
     """Search for Slay the Spire 2 across all Steam libraries and common paths."""
     # 1. Check environment variable first
     env_dir = os.environ.get("STS2_GAME_DIR")
-    if env_dir:
-        dll = os.path.join(env_dir, "data_sts2_windows_x86_64", "sts2.dll")
-        if os.path.isfile(dll):
-            return env_dir
+    if env_dir and os.path.isdir(env_dir):
+        return env_dir
 
-    # 2. Parse Steam's libraryfolders.vdf
+    # 2. Parse Steam's libraryfolders.vdf (platform-aware)
     for lib_path in _parse_steam_library_folders():
         found = _check_game_at(lib_path)
         if found:
             return found
 
-    # 3. Brute-force common locations on all drive letters
+    # 3. Brute-force common locations
     if sys.platform == "win32":
         for drive in "CDEFGHIJ":
             for folder in ["SteamLibrary", "Steam", "Games/Steam", "Games/SteamLibrary"]:
                 found = _check_game_at(f"{drive}:/{folder}")
+                if found:
+                    return found
+    else:
+        # Linux/macOS: check Flatpak and Snap Steam installs
+        extra_roots = [
+            Path.home() / ".var" / "app" / "com.valvesoftware.Steam" / ".steam" / "steam",
+            Path("/snap/steam/common/.steam/steam"),
+        ]
+        for root in extra_roots:
+            if root.exists():
+                found = _check_game_at(str(root))
                 if found:
                     return found
 
@@ -236,9 +290,10 @@ def check_decompiled(decompiled_dir: str | None = None) -> dict:
 
 def run_decompile(game_dir: str, decompiled_dir: str | None = None) -> dict:
     """Decompile sts2.dll using ilspycmd."""
-    dll_path = Path(game_dir) / "data_sts2_windows_x86_64" / "sts2.dll"
-    if not dll_path.exists():
-        return {"success": False, "error": f"sts2.dll not found at {dll_path}"}
+    dll_path_str = find_game_binary(game_dir)
+    if not dll_path_str:
+        return {"success": False, "error": f"Game binary not found in {game_dir}"}
+    dll_path = Path(dll_path_str)
 
     exe = _find_ilspycmd()
     if not exe:
@@ -353,7 +408,7 @@ def get_setup_status(game_dir: str | None = None, decompiled_dir: str | None = N
 
     sts2_dll_exists = False
     if resolved_game_dir:
-        sts2_dll_exists = os.path.isfile(os.path.join(resolved_game_dir, "data_sts2_windows_x86_64", "sts2.dll"))
+        sts2_dll_exists = find_game_binary(resolved_game_dir) is not None
 
     dotnet = check_dotnet()
     ilspy = check_ilspycmd()
@@ -521,8 +576,7 @@ def run_full_setup(interactive: bool = True) -> dict:
     print("\n[1/6] Finding game installation...", file=sys.stderr)
     game_dir = os.environ.get("STS2_GAME_DIR") or config.get("game_dir")
     if game_dir and os.path.isdir(game_dir):
-        dll = os.path.join(game_dir, "data_sts2_windows_x86_64", "sts2.dll")
-        if os.path.isfile(dll):
+        if find_game_binary(game_dir):
             print(f"  Found (saved): {game_dir}", file=sys.stderr)
         else:
             game_dir = None

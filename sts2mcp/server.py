@@ -2954,7 +2954,7 @@ async def _handle_tool(name: str, args: dict):
         return {
             "game_dir": GAME_DIR,
             "decompiled_dir": DECOMPILED_DIR,
-            "data_dir": str(Path(GAME_DIR) / "data_sts2_windows_x86_64"),
+            "data_dir": str(mod_gen.data_dir),
             "mods_dir": str(Path(GAME_DIR) / "mods"),
             "release_info": release_info,
             "entity_summary": game_data.get_entity_types_summary(),
@@ -4054,9 +4054,11 @@ def _launch_game(remote_debug: bool = False, renderer: str | None = None, extra_
 async def _decompile_game() -> dict:
     from .setup import _find_ilspycmd
 
-    dll_path = Path(GAME_DIR) / "data_sts2_windows_x86_64" / "sts2.dll"
-    if not dll_path.exists():
-        return {"success": False, "error": f"sts2.dll not found at {dll_path}"}
+    from .setup import find_game_binary
+    dll_path_str = find_game_binary(GAME_DIR)
+    if not dll_path_str:
+        return {"success": False, "error": f"Game binary not found in {GAME_DIR}"}
+    dll_path = Path(dll_path_str)
 
     exe = _find_ilspycmd()
     if not exe:
