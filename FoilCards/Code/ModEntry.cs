@@ -11,7 +11,6 @@ namespace FoilCards;
 public static class ModEntry
 {
     private static int _applyCount = 0;
-    private static readonly HashSet<ulong> _tiltSetup = new();
 
     public static void Init()
     {
@@ -78,33 +77,8 @@ public static class ModEntry
                     Log.Warn($"[FoilCards] Applied foil #{_applyCount}");
             }
 
-            // Setup 3D tilt on CardContainer using UseParentMaterial + vertex shader
-            // Only set UseParentMaterial on visual nodes (TextureRect, NinePatchRect, etc.)
-            // NOT on Labels/RichTextLabels (those get garbled)
-            var cardId = card.GetInstanceId();
-            if (!_tiltSetup.Contains(cardId))
-            {
-                var body = card.GetNodeOrNull<Control>("%CardContainer");
-                if (body != null)
-                {
-                    // Apply tilt vertex shader to CardContainer
-                    if (body.Material == null)
-                    {
-                        body.Material = FoilShader.CreateTiltMaterial();
-                    }
-
-                    // Set UseParentMaterial on visual children ONLY (skip text nodes)
-                    SetUseParentOnVisuals(body);
-                    _tiltSetup.Add(cardId);
-
-                    if (_applyCount <= 20)
-                        Log.Warn($"[FoilCards] Tilt setup on '{card.Name}'");
-                }
-            }
-
-            // Mouse tracking + tilt updates are done by the bridge's find_cards
-            // handler on the main thread. Background thread can't reliably call
-            // DisplayServer.MouseGetPosition(). Don't update shader params here.
+            // 3D tilt (Scale.X flip) is handled by the bridge's tilt loop
+            // via ApplyTiltToKnownCards on the main thread.
         }
         catch { }
     }

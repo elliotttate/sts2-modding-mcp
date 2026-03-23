@@ -3946,9 +3946,30 @@ public static class BridgeHandler
 
             if (doRotate)
             {
-                ctrl.PivotOffset = ctrl.Size * 0.5f;
-                ctrl.RotationDegrees = rotation;
-                info["rotation_set"] = rotation;
+                // Use rotation value as the Y-axis flip angle (degrees)
+                // cos(angle) gives scale_x: 1=front, 0=edge, -1=back
+                float angleRad = rotation * Mathf.Pi / 180.0f;
+                float scaleX = Mathf.Cos(angleRad);
+
+                // Find the Body (CardContainer) — it has the visual content
+                var flipBody = ctrl.GetNodeOrNull<Control>("%CardContainer");
+                if (flipBody != null)
+                {
+                    // Scale X to simulate Y-axis rotation
+                    // PivotOffset centers the flip
+                    flipBody.PivotOffset = new Vector2(150, 211); // half of card size 300x422
+                    flipBody.Scale = new Vector2(scaleX, 1.0f);
+                    flipBody.RotationDegrees = 0;
+                    info["flip_angle"] = rotation;
+                    info["scale_x"] = scaleX;
+                }
+                else
+                {
+                    // Fallback: just rotate
+                    ctrl.PivotOffset = ctrl.Size * 0.5f;
+                    ctrl.RotationDegrees = rotation;
+                    info["rotation_set"] = rotation;
+                }
             }
 
             results.Add(info);
@@ -4207,23 +4228,21 @@ void fragment() {
                     catch { foilMat.SetShaderParameter("light_angle", rel); }
                 }
 
-                // Update tilt shader on CardContainer
-                if (body?.Material is ShaderMaterial tiltMat)
+                // 3D Y-axis tilt via Scale.X on CardContainer
+                // Scale.X = cos(tilt_angle) simulates rotation around vertical axis
+                if (body != null)
                 {
-                    float tgtX = rel.X * 0.15f * prox;
-                    float tgtY = rel.Y * 0.08f * prox;
-                    try
-                    {
-                        float cX = (float)tiltMat.GetShaderParameter("tilt_x").AsDouble();
-                        float cY = (float)tiltMat.GetShaderParameter("tilt_y").AsDouble();
-                        tiltMat.SetShaderParameter("tilt_x", Mathf.Lerp(cX, tgtX, 0.2f));
-                        tiltMat.SetShaderParameter("tilt_y", Mathf.Lerp(cY, tgtY, 0.2f));
-                    }
-                    catch
-                    {
-                        tiltMat.SetShaderParameter("tilt_x", tgtX);
-                        tiltMat.SetShaderParameter("tilt_y", tgtY);
-                    }
+                    // Mouse X position drives the tilt angle (max ~20 degrees)
+                    float tiltAngle = rel.X * 20.0f * prox; // degrees
+                    float tiltRad = tiltAngle * Mathf.Pi / 180.0f;
+                    float targetScaleX = Mathf.Cos(tiltRad);
+
+                    // Smooth lerp current scale toward target
+                    float curScaleX = body.Scale.X;
+                    float newScaleX = Mathf.Lerp(curScaleX, targetScaleX, 0.15f);
+
+                    body.PivotOffset = new Vector2(150, 211); // card center
+                    body.Scale = new Vector2(newScaleX, 1.0f);
                 }
             }
             catch { }
