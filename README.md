@@ -306,11 +306,11 @@ git clone https://github.com/elliotttate/sts2-modding-mcp.git
 cd sts2-modding-mcp
 python -m venv venv
 
-# Activate the virtual environment
-# Windows (PowerShell):  venv\Scripts\Activate.ps1
-# Windows (cmd):         venv\Scripts\activate.bat
-# Windows (Git Bash):    source venv/Scripts/activate
-# macOS / Linux:         source venv/bin/activate
+# Activate the virtual environment:
+source venv/bin/activate         # macOS / Linux
+# source venv/Scripts/activate   # Windows (Git Bash)
+# venv\Scripts\activate.bat      # Windows cmd
+# venv\Scripts\Activate.ps1      # Windows PowerShell
 
 pip install .
 python -m sts2mcp.setup          # auto-finds game, installs tools, decompiles
@@ -334,10 +334,14 @@ cd sts2-modding-mcp
 python -m venv venv
 
 # Activate it
-# Windows (PowerShell):  venv\Scripts\Activate.ps1
-# Windows (cmd):         venv\Scripts\activate.bat
-# Windows (Git Bash):    source venv/Scripts/activate
-# macOS / Linux:         source venv/bin/activate
+# macOS / Linux:
+source venv/bin/activate
+# Windows (Git Bash):
+# source venv/Scripts/activate
+# Windows (PowerShell):
+# venv\Scripts\Activate.ps1
+# Windows (cmd):
+# venv\Scripts\activate.bat
 
 # Install the MCP server and all required dependencies
 pip install .
@@ -369,10 +373,16 @@ You can find your exact path by right-clicking the game in Steam → Manage → 
 Download the latest [GDRE Tools release](https://github.com/GDRETools/gdsdecomp/releases) and extract it to the `tools/` directory:
 
 ```bash
-# From the project root — download the latest release for your platform
-# (check https://github.com/GDRETools/gdsdecomp/releases for the current version)
+# From the project root (check https://github.com/GDRETools/gdsdecomp/releases for the latest version)
 mkdir -p tools && cd tools
-curl -L -o gdre_tools.zip "https://github.com/GDRETools/gdsdecomp/releases/latest/download/GDRE_tools-$(curl -sL https://api.github.com/repos/GDRETools/gdsdecomp/releases/latest | grep tag_name | cut -d'"' -f4)-windows.zip"
+
+# macOS:
+curl -L -o gdre_tools.zip https://github.com/GDRETools/gdsdecomp/releases/download/v2.4.0/GDRE_tools-v2.4.0-macos.zip
+# Linux:
+# curl -L -o gdre_tools.zip https://github.com/GDRETools/gdsdecomp/releases/download/v2.4.0/GDRE_tools-v2.4.0-linux.zip
+# Windows:
+# curl -L -o gdre_tools.zip https://github.com/GDRETools/gdsdecomp/releases/download/v2.4.0/GDRE_tools-v2.4.0-windows.zip
+
 unzip gdre_tools.zip && rm gdre_tools.zip
 ```
 
@@ -426,7 +436,7 @@ The resolution order for each path is: **environment variable → config file �
 
 The MCP server connects to any AI tool that supports the [Model Context Protocol](https://modelcontextprotocol.io/). Point the config at the **venv's Python** so dependencies are always available — no need to activate the venv first.
 
-> **Important:** Replace `/path/to/sts2-modding-mcp` below with the actual path where you cloned the repo. On **macOS / Linux**, use `venv/bin/python` instead of `venv/Scripts/python.exe`.
+> **Important:** Replace `/path/to/sts2-modding-mcp` below with the actual path where you cloned the repo.
 
 #### Claude Desktop
 
@@ -437,18 +447,20 @@ Edit your Claude Desktop config file:
 
 Add the following (create the file if it doesn't exist):
 
+**macOS / Linux:**
+
 ```json
 {
   "mcpServers": {
     "sts2-modding": {
-      "command": "/path/to/sts2-modding-mcp/venv/Scripts/python.exe",
+      "command": "/path/to/sts2-modding-mcp/venv/bin/python",
       "args": ["/path/to/sts2-modding-mcp/run.py"]
     }
   }
 }
 ```
 
-For example, if you cloned to `C:\Users\YourName\sts2-modding-mcp`:
+**Windows:**
 
 ```json
 {
@@ -465,33 +477,49 @@ Restart Claude Desktop. The server tools should appear in the toolbox icon (hamm
 
 #### Claude Code (CLI)
 
-**Option A — Project scope** (`.mcp.json` in your working directory):
+**Option A — One-liner** (easiest):
+
+```bash
+# macOS / Linux:
+claude mcp add sts2-modding /path/to/sts2-modding-mcp/venv/bin/python -- /path/to/sts2-modding-mcp/run.py
+
+# Windows:
+claude mcp add sts2-modding C:\path\to\sts2-modding-mcp\venv\Scripts\python.exe -- C:\path\to\sts2-modding-mcp\run.py
+```
+
+**Option B — Project scope** (`.mcp.json` in your working directory):
+
+**macOS / Linux:**
 
 ```json
 {
   "mcpServers": {
     "sts2-modding": {
-      "command": "/path/to/sts2-modding-mcp/venv/Scripts/python.exe",
+      "command": "/path/to/sts2-modding-mcp/venv/bin/python",
       "args": ["/path/to/sts2-modding-mcp/run.py"]
     }
   }
 }
 ```
 
-**Option B — User scope** (`~/.claude/mcp.json`, shared across all projects):
+**Windows:**
 
 ```json
 {
   "mcpServers": {
     "sts2-modding": {
-      "command": "/path/to/sts2-modding-mcp/venv/Scripts/python.exe",
-      "args": ["/path/to/sts2-modding-mcp/run.py"]
+      "command": "C:\\path\\to\\sts2-modding-mcp\\venv\\Scripts\\python.exe",
+      "args": ["C:\\path\\to\\sts2-modding-mcp\\run.py"]
     }
   }
 }
 ```
 
-> **Note:** Claude Code does **not** support `mcpServers` inside `~/.claude/settings.json`. Use `.mcp.json` (project) or `~/.claude/mcp.json` (user) instead.
+**Option C — User scope** (`~/.claude/mcp.json`, shared across all projects):
+
+Same JSON format as Option B, placed in `~/.claude/mcp.json` instead.
+
+> **Note:** Claude Code does **not** support `mcpServers` inside `~/.claude/settings.json`. Use `.mcp.json` (project), `~/.claude/mcp.json` (user), or `claude mcp add` instead.
 
 Restart Claude Code and the server should appear in `/mcp`.
 

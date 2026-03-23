@@ -27,22 +27,34 @@ from urllib import request, error as urlerror
 def _find_project_root() -> Path:
     """Find the sts2-modding-mcp repo root.
 
-    Checks (in order): parent of __file__ (source checkout), then cwd, then
-    walks up from cwd looking for run.py + sts2mcp/ as markers.
+    Checks (in order): parent of __file__ (source checkout), then the directory
+    of the entry-point script (sys.argv[0], e.g. run.py), then cwd, then walks
+    up from cwd looking for run.py + sts2mcp/ as markers.
     """
+    def _is_repo_root(p: Path) -> bool:
+        return (p / "run.py").exists() and (p / "sts2mcp").is_dir()
+
     # 1. Source checkout: __file__ is sts2mcp/setup.py, parent.parent is repo root
     candidate = Path(__file__).resolve().parent.parent
-    if (candidate / "run.py").exists() and (candidate / "sts2mcp").is_dir():
+    if _is_repo_root(candidate):
         return candidate
 
-    # 2. Current working directory (user ran `python -m sts2mcp.setup` from repo)
+    # 2. Directory of the entry-point script (e.g. run.py launched by an MCP client).
+    #    When pip-installed (non-editable), __file__ is in site-packages so check 1
+    #    fails, but sys.argv[0] still points at the repo's run.py.
+    if sys.argv:
+        script_dir = Path(sys.argv[0]).resolve().parent
+        if _is_repo_root(script_dir):
+            return script_dir
+
+    # 3. Current working directory (user ran `python -m sts2mcp.setup` from repo)
     cwd = Path.cwd()
-    if (cwd / "run.py").exists() and (cwd / "sts2mcp").is_dir():
+    if _is_repo_root(cwd):
         return cwd
 
-    # 3. Walk up from cwd
+    # 4. Walk up from cwd
     for parent in cwd.parents:
-        if (parent / "run.py").exists() and (parent / "sts2mcp").is_dir():
+        if _is_repo_root(parent):
             return parent
 
     # Fallback to cwd (best effort)
