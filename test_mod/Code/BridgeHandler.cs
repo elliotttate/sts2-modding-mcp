@@ -4059,9 +4059,28 @@ public static class BridgeHandler
                 if (body != null)
                 {
                     float angleRad = _autoRotateAngle * Mathf.Pi / 180.0f;
-                    float scaleX = Mathf.Cos(angleRad);
-                    body.PivotOffset = new Vector2(150, 211);
-                    body.Scale = new Vector2(scaleX, 1.0f);
+                    float tiltX = Mathf.Sin(angleRad) * 0.4f; // tilt parameter for vertex shader
+
+                    // Apply vertex shader to CardContainer if not already set
+                    if (_tiltShader == null)
+                    {
+                        _tiltShader = new Shader();
+                        _tiltShader.Code = TiltShaderCode;
+                    }
+
+                    var mat = body.Material as ShaderMaterial;
+                    if (mat == null || mat.Shader != _tiltShader)
+                    {
+                        mat = new ShaderMaterial();
+                        mat.Shader = _tiltShader;
+                        body.Material = mat;
+
+                        // Set UseParentMaterial on visual children only
+                        SetUseParentOnChildren(body);
+                    }
+
+                    mat.SetShaderParameter("tilt_x", tiltX);
+                    mat.SetShaderParameter("tilt_y", 0f);
                 }
             }
             catch { }
@@ -4072,6 +4091,29 @@ public static class BridgeHandler
         for (int i = 0; i < count; i++)
         {
             try { AutoRotateCards(node.GetChild(i)); } catch { }
+        }
+    }
+
+    private static void SetUseParentOnChildren(Node parent)
+    {
+        for (int i = 0; i < parent.GetChildCount(); i++)
+        {
+            try
+            {
+                var child = parent.GetChild(i);
+                // Skip ALL text-related nodes
+                var tn = child.GetType().Name;
+                if (tn.Contains("Label") || tn.Contains("RichText") || tn.Contains("MegaLabel") || tn.Contains("MegaRich"))
+                    continue;
+                if (child is Label || child is RichTextLabel)
+                    continue;
+
+                if (child is CanvasItem ci)
+                    ci.UseParentMaterial = true;
+
+                SetUseParentOnChildren(child);
+            }
+            catch { }
         }
     }
 
