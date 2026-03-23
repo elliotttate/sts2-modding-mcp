@@ -132,6 +132,35 @@ void fragment() {
         return _shader;
     }
 
+    // Separate tilt shader for the whole card (applied to CardContainer)
+    private static Shader? _tiltShader;
+    private const string TiltShaderCode = @"
+shader_type canvas_item;
+uniform float tilt_x = 0.0;
+uniform float tilt_y = 0.0;
+void fragment() {
+    vec2 c = UV - 0.5;
+    float persp = 1.0 + c.x * tilt_x + c.y * tilt_y * 0.5;
+    persp = max(persp, 0.15);
+    vec2 uv = vec2(c.x / persp, c.y / persp) + 0.5;
+    uv = clamp(uv, vec2(0.0), vec2(1.0));
+    float facing = clamp(1.0 + c.x * tilt_x * 0.5, 0.7, 1.3);
+    vec4 col = texture(TEXTURE, uv);
+    col.rgb *= facing;
+    COLOR = col;
+}
+";
+
+    public static Shader GetTiltShader()
+    {
+        if (_tiltShader == null)
+        {
+            _tiltShader = new Shader();
+            _tiltShader.Code = TiltShaderCode;
+        }
+        return _tiltShader;
+    }
+
     public static ShaderMaterial CreateMaterial()
     {
         var mat = new ShaderMaterial();

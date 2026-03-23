@@ -117,6 +117,8 @@ public static class BridgeHandler
                 "navigate_menu" => MainThreadDispatcher.Invoke(() => NavigateMenu(root)),
                 "find_cards" => MainThreadDispatcher.Invoke(() => FindCards(root)),
                 "card_tilt_test" => MainThreadDispatcher.Invoke(() => CardTiltTest(root)),
+                "start_card_tilt_loop" => StartCardTiltLoop(),
+                "stop_card_tilt_loop" => StopCardTiltLoop(),
                 "start_foil_tilt" => MainThreadDispatcher.Invoke(() => StartFoilTilt()),
                 "stop_foil_tilt" => MainThreadDispatcher.Invoke(() => StopFoilTilt()),
                 "click_node" => MainThreadDispatcher.Invoke(() => ClickNode(root)),
@@ -3925,16 +3927,27 @@ public static class BridgeHandler
                     bool isOver = cRect.HasPoint(mousePos);
                     float prox = isOver ? 1.0f : Mathf.Max(0, 1.0f - (rel.Length() - 1.0f) * 2.0f);
 
-                    // 3D skew tilt
-                    float targetSkew = rel.X * 0.1f * prox;
-                    float curSkew = (float)ctrl.Get("skew");
-                    float newSkew = Mathf.Lerp(curSkew, targetSkew, 0.3f);
+                    // Update tilt shader on CardContainer
+                    var tiltBody = ctrl.GetNodeOrNull<Control>("%CardContainer");
+                    if (tiltBody?.Material is ShaderMaterial tiltSm)
+                    {
+                        float tgtX = rel.X * 0.3f * prox;
+                        float tgtY = rel.Y * 0.15f * prox;
+                        try
+                        {
+                            float cX = (float)tiltSm.GetShaderParameter("tilt_x").AsDouble();
+                            float cY = (float)tiltSm.GetShaderParameter("tilt_y").AsDouble();
+                            tiltSm.SetShaderParameter("tilt_x", Mathf.Lerp(cX, tgtX, 0.25f));
+                            tiltSm.SetShaderParameter("tilt_y", Mathf.Lerp(cY, tgtY, 0.25f));
+                        }
+                        catch
+                        {
+                            tiltSm.SetShaderParameter("tilt_x", tgtX);
+                            tiltSm.SetShaderParameter("tilt_y", tgtY);
+                        }
+                    }
 
-                    ctrl.PivotOffset = ctrl.Size * 0.5f;
-                    ctrl.Set("skew", newSkew);
-                    ctrl.RotationDegrees = 0;
-
-                    // Update shader light angle too
+                    // Update foil shader light angle
                     var portrait2 = ctrl.GetNodeOrNull<TextureRect>("%Portrait");
                     if (portrait2?.Material is ShaderMaterial sm)
                     {
@@ -3947,18 +3960,19 @@ public static class BridgeHandler
                     }
 
                     info["mouse_relative"] = $"({rel.X:F2},{rel.Y:F2})";
-                    info["skew"] = newSkew;
                 }
             }
             catch { }
 
             if (doRotate)
             {
-                ctrl.PivotOffset = ctrl.Size * 0.5f;
-                float skewRad = rotation * Mathf.Pi / 180.0f * 0.15f;
-                ctrl.Set("skew", skewRad);
-                ctrl.RotationDegrees = 0;
-                info["skew_set_to"] = skewRad;
+                var tiltBody2 = ctrl.GetNodeOrNull<Control>("%CardContainer");
+                if (tiltBody2?.Material is ShaderMaterial tm)
+                {
+                    float tiltVal = rotation * 0.01f; // rotation in "degrees" mapped to tilt strength
+                    tm.SetShaderParameter("tilt_x", tiltVal);
+                    info["tilt_set_to"] = tiltVal;
+                }
             }
 
             results.Add(info);
@@ -3971,6 +3985,46 @@ public static class BridgeHandler
             try { FindCardsRecursive(node.GetChild(i), results, ref totalNodes, doRotate, rotation); }
             catch { }
         }
+    }
+
+    // ─── Continuous Card Tilt Loop ─────────────────────────────────────────
+
+    private static bool _cardTiltLoopRunning = false;
+
+    private static object StartCardTiltLoop()
+    {
+        if (_cardTiltLoopRunning)
+            return new { success = true, status = "already_running" };
+
+        _cardTiltLoopRunning = true;
+
+        // Create a minimal JsonElement for FindCards with no params
+        var emptyJson = System.Text.Json.JsonDocument.Parse("{\"params\":{}}").RootElement;
+
+        System.Threading.Tasks.Task.Run(async () =>
+        {
+            ModEntry.WriteLog("[CardTiltLoop] Started");
+            while (_cardTiltLoopRunning)
+            {
+                try
+                {
+                    // FindCards via MainThreadDispatcher.Invoke — THE ONLY PATH THAT WORKS
+                    // It discovers cards, applies foil, updates mouse-driven tilt, all on main thread
+                    MainThreadDispatcher.Invoke(() => FindCards(emptyJson));
+                }
+                catch { }
+                await System.Threading.Tasks.Task.Delay(50); // ~20fps
+            }
+            ModEntry.WriteLog("[CardTiltLoop] Stopped");
+        });
+
+        return new { success = true, status = "started" };
+    }
+
+    private static object StopCardTiltLoop()
+    {
+        _cardTiltLoopRunning = false;
+        return new { success = true, status = "stopped" };
     }
 
     // ─── Card Tilt Test ────────────────────────────────────────────────────
