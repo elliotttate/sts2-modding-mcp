@@ -373,7 +373,8 @@ You can find your exact path by right-clicking the game in Steam → Manage → 
 Download the latest [GDRE Tools release](https://github.com/GDRETools/gdsdecomp/releases) and extract it to the `tools/` directory:
 
 ```bash
-# From the project root (check https://github.com/GDRETools/gdsdecomp/releases for the latest version)
+# From the project root — extract into tools/ so the binary ends up at tools/gdre_tools
+# (check https://github.com/GDRETools/gdsdecomp/releases for the latest version)
 mkdir -p tools && cd tools
 
 # macOS:
@@ -383,12 +384,12 @@ curl -L -o gdre_tools.zip https://github.com/GDRETools/gdsdecomp/releases/downlo
 # Windows:
 # curl -L -o gdre_tools.zip https://github.com/GDRETools/gdsdecomp/releases/download/v2.4.0/GDRE_tools-v2.4.0-windows.zip
 
-unzip gdre_tools.zip && rm gdre_tools.zip
+unzip gdre_tools.zip && rm gdre_tools.zip && cd ..
 ```
 
 > **Easier:** Run `python -m sts2mcp.setup` and let it download GDRE Tools automatically for your platform.
 
-Or set `gdre_tools_path` in `sts2mcp_config.json` (see [Configure paths](#4-configure-paths)) to point to your `gdre_tools` binary.
+The server expects the binary at `tools/gdre_tools.exe` (Windows) or `tools/gdre_tools` (macOS/Linux) by default. If you place it elsewhere, set `gdre_tools_path` in `sts2mcp_config.json` (see [Configure paths](#4-configure-paths)) to point to your `gdre_tools` binary.
 
 The `list_game_assets` and `search_game_assets` tools will then automatically find and index `SlayTheSpire2.pck`. Use `recover_game_project` for a one-time full extraction with GDScript decompilation.
 
