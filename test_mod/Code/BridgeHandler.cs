@@ -4117,20 +4117,9 @@ public static class BridgeHandler
 
                 float proximity = mouseOver ? 1.0f : 0.0f;
 
-                // Physical tilt: X mouse → Y-axis rotation (Scale.X + skew)
-                // Y mouse → foil shader only (no physical vertical tilt — it just stretches)
-                float tiltDeg = rel.X * 25.0f * proximity;
-                float tiltRad = tiltDeg * Mathf.Pi / 180.0f;
-
-                float targetScaleX = Mathf.Cos(tiltRad);
-                float targetSkew = Mathf.Sin(tiltRad) * 0.15f;
-
-                float curScaleX = body.Scale.X;
-                float curSkew = (float)body.Get("skew");
-
-                body.PivotOffset = cardCenter - body.GlobalPosition;
-                body.Scale = new Vector2(Mathf.Lerp(curScaleX, targetScaleX, 0.12f), 1.0f);
-                body.Set("skew", Mathf.Lerp(curSkew, targetSkew, 0.12f));
+                // Physical tilt is now handled entirely by the vertex shader
+                // in the foil material via tilt_x/tilt_y uniforms.
+                // No Scale/skew needed — shader params persist through Post().
 
                 // Update foil shader — drives rainbow shift and sparkle based on tilt
                 if (body.Material is ShaderMaterial foilMat)
