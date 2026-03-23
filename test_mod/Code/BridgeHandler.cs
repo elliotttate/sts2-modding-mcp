@@ -3899,10 +3899,61 @@ public static class BridgeHandler
                 info["portrait_texture"] = portrait.Texture != null;
             }
 
+            // Compute mouse-relative position and apply tilt
+            try
+            {
+                // Use DisplayServer for mouse, and Body child for card rect (NCard itself has size 0)
+                var screenMouse = DisplayServer.MouseGetPosition();
+                var winPos = DisplayServer.WindowGetPosition();
+                var mousePos = new Vector2(screenMouse.X - winPos.X, screenMouse.Y - winPos.Y);
+
+                // Get the Body/CardContainer child's rect (has actual visual size)
+                var body = ctrl.GetNodeOrNull<Control>("%CardContainer");
+                var cRect = body != null ? body.GetGlobalRect() : ctrl.GetGlobalRect();
+                // Fallback: use portrait rect if body also has no size
+                if (cRect.Size.X < 1 || cRect.Size.Y < 1)
+                {
+                    cRect = portrait.GetGlobalRect();
+                }
+                if (cRect.Size.X > 1 && cRect.Size.Y > 1)
+                {
+                    var cCenter = cRect.Position + cRect.Size * 0.5f;
+                    var rel = (mousePos - cCenter) / (cRect.Size * 0.5f);
+                    rel = rel.Clamp(new Vector2(-1.5f, -1.5f), new Vector2(1.5f, 1.5f));
+
+                    bool isOver = cRect.HasPoint(mousePos);
+                    float prox = isOver ? 1.0f : Mathf.Max(0, 1.0f - (rel.Length() - 1.0f) * 2.0f);
+
+                    // 3D skew tilt
+                    float targetSkew = rel.X * 0.1f * prox;
+                    float curSkew = (float)ctrl.Get("skew");
+                    float newSkew = Mathf.Lerp(curSkew, targetSkew, 0.3f);
+
+                    ctrl.PivotOffset = ctrl.Size * 0.5f;
+                    ctrl.Set("skew", newSkew);
+                    ctrl.RotationDegrees = 0;
+
+                    // Update shader light angle too
+                    var portrait2 = ctrl.GetNodeOrNull<TextureRect>("%Portrait");
+                    if (portrait2?.Material is ShaderMaterial sm)
+                    {
+                        try
+                        {
+                            var cur = sm.GetShaderParameter("light_angle").AsVector2();
+                            sm.SetShaderParameter("light_angle", cur.Lerp(rel, 0.3f));
+                        }
+                        catch { sm.SetShaderParameter("light_angle", rel); }
+                    }
+
+                    info["mouse_relative"] = $"({rel.X:F2},{rel.Y:F2})";
+                    info["skew"] = newSkew;
+                }
+            }
+            catch { }
+
             if (doRotate)
             {
                 ctrl.PivotOffset = ctrl.Size * 0.5f;
-                // Convert degrees to skew radians for 3D-like tilt
                 float skewRad = rotation * Mathf.Pi / 180.0f * 0.15f;
                 ctrl.Set("skew", skewRad);
                 ctrl.RotationDegrees = 0;
@@ -3924,6 +3975,8 @@ public static class BridgeHandler
     // ─── Continuous Foil Tilt Loop ──────────────────────────────────────────
 
     private static bool _foilTiltRunning = false;
+    private static int _tiltDebugCount = 0;
+    private static int _tiltMouseLog = 0;
     private static readonly List<ulong> _knownCardIds = new();
     private const float FoilMaxTilt = 15.0f;
     private const float FoilTiltLerp = 0.15f;
@@ -3950,11 +4003,24 @@ public static class BridgeHandler
                         catch { }
                     }
 
-                    // Apply tilt via Invoke (blocking — runs on main thread synchronously)
-                    if (_knownCardIds.Count > 0)
+                    // Apply tilt
+                    int idCount = _knownCardIds.Count;
+                    if (idCount > 0)
                     {
+                        if (_tiltDebugCount < 3)
+                        {
+                            _tiltDebugCount++;
+                            ModEntry.WriteLog($"[FoilTilt] Invoking tilt for {idCount} cards...");
+                        }
                         try { MainThreadDispatcher.Invoke(() => ApplyTiltToKnownCards()); }
-                        catch { }
+                        catch (Exception ex)
+                        {
+                            if (_tiltDebugCount < 10)
+                            {
+                                _tiltDebugCount++;
+                                ModEntry.WriteLog($"[FoilTilt] Invoke FAILED: {ex.GetType().Name}: {ex.Message}");
+                            }
+                        }
                     }
                 }
                 catch { }
@@ -3997,19 +4063,47 @@ public static class BridgeHandler
         }
     }
 
+    private static int _applyDebug = 0;
+
     private static void ApplyTiltToKnownCards()
     {
+        if (_applyDebug < 3)
+        {
+            _applyDebug++;
+            ModEntry.WriteLog($"[FoilTilt] ApplyTiltToKnownCards: {_knownCardIds.Count} IDs");
+        }
+
         foreach (var cardId in _knownCardIds)
         {
             try
             {
                 var cardObj = GodotObject.InstanceFromId(cardId);
-                if (cardObj is not Control card) continue;
+                if (_applyDebug <= 5 && cardObj == null)
+                {
+                    _applyDebug++;
+                    ModEntry.WriteLog($"[FoilTilt] InstanceFromId({cardId}) = null");
+                    continue;
+                }
+                if (cardObj is not Control card)
+                {
+                    if (_applyDebug <= 5)
+                    {
+                        _applyDebug++;
+                        ModEntry.WriteLog($"[FoilTilt] Not Control: {cardObj?.GetType().Name}");
+                    }
+                    continue;
+                }
 
                 var portrait = card.GetNodeOrNull<TextureRect>("%Portrait");
                 if (portrait == null || !portrait.Visible) continue;
 
-                var mouseGlobal = card.GetGlobalMousePosition();
+                // Use DisplayServer for real mouse position (GetGlobalMousePosition
+                // returns stale data from MainThreadDispatcher context)
+                var screenMouse = DisplayServer.MouseGetPosition();
+                var viewport = card.GetViewport();
+                // Convert screen coords to viewport coords
+                var viewportPos = viewport?.GetWindow()?.Position ?? Vector2I.Zero;
+                var mouseGlobal = new Vector2(screenMouse.X - viewportPos.X, screenMouse.Y - viewportPos.Y);
                 var cardRect = card.GetGlobalRect();
                 if (cardRect.Size.X < 1 || cardRect.Size.Y < 1) continue;
 
@@ -4026,6 +4120,13 @@ public static class BridgeHandler
                         mat.SetShaderParameter("light_angle", cur.Lerp(relative, FoilLightLerp));
                     }
                     catch { mat.SetShaderParameter("light_angle", relative); }
+                }
+
+                if (_tiltMouseLog < 5)
+                {
+                    _tiltMouseLog++;
+                    var screenMPos = DisplayServer.MouseGetPosition();
+                    ModEntry.WriteLog($"[FoilTilt] screenMouse=({screenMPos.X},{screenMPos.Y}) mouse=({mouseGlobal.X:F0},{mouseGlobal.Y:F0}) card=({cardRect.Position.X:F0},{cardRect.Position.Y:F0}) size=({cardRect.Size.X:F0},{cardRect.Size.Y:F0}) rel=({relative.X:F2},{relative.Y:F2})");
                 }
 
                 // 3D-style perspective tilt using skew + scale (not 2D rotation)
