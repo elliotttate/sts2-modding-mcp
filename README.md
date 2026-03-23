@@ -305,10 +305,18 @@ The `get_modding_guide` tool provides built-in documentation. The 12 new topics 
 git clone https://github.com/elliotttate/sts2-modding-mcp.git
 cd sts2-modding-mcp
 python -m venv venv
-venv\Scripts\activate.bat        # Windows cmd  (PowerShell: venv\Scripts\Activate.ps1)
+
+# Activate the virtual environment
+# Windows (PowerShell):  venv\Scripts\Activate.ps1
+# Windows (cmd):         venv\Scripts\activate.bat
+# Windows (Git Bash):    source venv/Scripts/activate
+# macOS / Linux:         source venv/bin/activate
+
 pip install .
 python -m sts2mcp.setup          # auto-finds game, installs tools, decompiles
 ```
+
+> **Tip:** In CI or non-interactive shells, use `python -m sts2mcp.setup -y` to auto-accept all prompts.
 
 Then add the MCP server to your AI tool's config (see [step 5](#5-connect-to-an-ai-assistant) below) and restart it.
 
@@ -326,12 +334,10 @@ cd sts2-modding-mcp
 python -m venv venv
 
 # Activate it
-# Windows (PowerShell):
-venv\Scripts\Activate.ps1
-# Windows (cmd):
-venv\Scripts\activate.bat
-# macOS / Linux:
-# source venv/bin/activate
+# Windows (PowerShell):  venv\Scripts\Activate.ps1
+# Windows (cmd):         venv\Scripts\activate.bat
+# Windows (Git Bash):    source venv/Scripts/activate
+# macOS / Linux:         source venv/bin/activate
 
 # Install the MCP server and all required dependencies
 pip install .
@@ -363,14 +369,14 @@ You can find your exact path by right-clicking the game in Steam → Manage → 
 Download the latest [GDRE Tools release](https://github.com/GDRETools/gdsdecomp/releases) and extract it to the `tools/` directory:
 
 ```bash
-# From the project root
-mkdir tools
-cd tools
-# Download and extract (Windows example)
-curl -L -o gdre_tools.zip https://github.com/GDRETools/gdsdecomp/releases/download/v2.4.0/GDRE_tools-v2.4.0-windows.zip
-unzip gdre_tools.zip
-rm gdre_tools.zip
+# From the project root — download the latest release for your platform
+# (check https://github.com/GDRETools/gdsdecomp/releases for the current version)
+mkdir -p tools && cd tools
+curl -L -o gdre_tools.zip "https://github.com/GDRETools/gdsdecomp/releases/latest/download/GDRE_tools-$(curl -sL https://api.github.com/repos/GDRETools/gdsdecomp/releases/latest | grep tag_name | cut -d'"' -f4)-windows.zip"
+unzip gdre_tools.zip && rm gdre_tools.zip
 ```
+
+> **Easier:** Run `python -m sts2mcp.setup` and let it download GDRE Tools automatically for your platform.
 
 Or set `gdre_tools_path` in `sts2mcp_config.json` (see [Configure paths](#4-configure-paths)) to point to your `gdre_tools` binary.
 

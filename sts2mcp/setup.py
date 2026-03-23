@@ -588,8 +588,16 @@ def auto_detect_on_startup() -> None:
 
 
 def _ask(prompt: str, default: bool = True) -> bool:
-    """Ask a yes/no question in interactive mode."""
+    """Ask a yes/no question in interactive mode.
+
+    Returns the default when stdin is not a TTY (piped/redirected) so that
+    setup behaves sensibly in non-interactive shells without needing an
+    explicit ``--yes`` flag.
+    """
     suffix = " [Y/n] " if default else " [y/N] "
+    if not sys.stdin.isatty():
+        print(prompt + suffix + ("y" if default else "n") + "  (auto, non-interactive)", file=sys.stderr)
+        return default
     try:
         answer = input(prompt + suffix).strip().lower()
         if not answer:
@@ -597,7 +605,7 @@ def _ask(prompt: str, default: bool = True) -> bool:
         return answer in ("y", "yes")
     except (EOFError, KeyboardInterrupt):
         print()
-        return False
+        return default
 
 
 def _check_python_version() -> None:
@@ -808,7 +816,8 @@ def cli_main():
     """Entry point for `python -m sts2mcp.setup` and `sts2mcp-setup` command."""
     import argparse
     parser = argparse.ArgumentParser(description="STS2 Modding MCP -- automated setup")
-    parser.add_argument("--non-interactive", action="store_true", help="Skip prompts, only detect")
+    parser.add_argument("--non-interactive", "-y", "--yes", action="store_true",
+                        help="Auto-accept all prompts (install tools, decompile, download GDRE)")
     parser.add_argument("--status", action="store_true", help="Show setup status and exit")
     args = parser.parse_args()
 
