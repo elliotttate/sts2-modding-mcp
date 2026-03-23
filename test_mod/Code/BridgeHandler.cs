@@ -3990,7 +3990,8 @@ public static class BridgeHandler
 
     private static bool _autoRotate = false;
     private static float _autoRotateAngle = 0f;
-    private static float _autoRotateSpeed = 2f; // degrees per tick
+    private static float _autoRotateSpeed = 2f;
+    private static int _autoRotateDebug = 0; // degrees per tick
 
     private static object StartAutoRotate()
     {
@@ -4063,39 +4064,47 @@ public static class BridgeHandler
                 var body = ctrl.GetNodeOrNull<Control>("%CardContainer");
                 if (body == null) goto recurse;
 
-                // Get all visual children to compute the actual card bounding box
-                // This handles scaled/zoomed cards correctly
-                float minX = float.MaxValue, minY = float.MaxValue;
-                float maxX = float.MinValue, maxY = float.MinValue;
-                for (int ci = 0; ci < body.GetChildCount(); ci++)
+                // Get effective card rect by reading the Frame's rect BEFORE we apply any transform.
+                // Reset body transform temporarily to get unscaled rect.
+                var savedScale = body.Scale;
+                var savedSkew = (float)body.Get("skew");
+                body.Scale = Vector2.One;
+                body.Set("skew", 0f);
+
+                var frame = ctrl.GetNodeOrNull<TextureRect>("%Frame");
+                Rect2 rect;
+                if (frame != null)
                 {
-                    try
-                    {
-                        if (body.GetChild(ci) is Control child && child.Visible)
-                        {
-                            var cr = child.GetGlobalRect();
-                            if (cr.Size.X > 1 && cr.Size.Y > 1)
-                            {
-                                minX = Mathf.Min(minX, cr.Position.X);
-                                minY = Mathf.Min(minY, cr.Position.Y);
-                                maxX = Mathf.Max(maxX, cr.Position.X + cr.Size.X);
-                                maxY = Mathf.Max(maxY, cr.Position.Y + cr.Size.Y);
-                            }
-                        }
-                    }
-                    catch { }
+                    rect = frame.GetGlobalRect();
                 }
-                if (minX >= maxX || minY >= maxY) goto recurse;
-                var rect = new Rect2(minX, minY, maxX - minX, maxY - minY);
+                else
+                {
+                    // Fallback
+                    var cardPos = ctrl.GlobalPosition;
+                    rect = new Rect2(cardPos.X - 150, cardPos.Y - 211, 300, 422);
+                }
+
+                // Restore transform
+                body.Scale = savedScale;
+                body.Set("skew", savedSkew);
+
+                if (rect.Size.X < 10 || rect.Size.Y < 10) goto recurse;
 
                 // Mouse position relative to card center, normalized -1..1
-                var center = new Vector2((minX + maxX) * 0.5f, (minY + maxY) * 0.5f);
+                var center = rect.Position + rect.Size * 0.5f;
                 var rel = (_cachedMousePos - center) / (rect.Size * 0.5f);
                 rel = rel.Clamp(new Vector2(-1.5f, -1.5f), new Vector2(1.5f, 1.5f));
 
                 // Only tilt the card the mouse is directly over — others return to flat
                 bool mouseOver = rect.HasPoint(_cachedMousePos);
                 float proximity = mouseOver ? 1.0f : 0.0f;
+
+                // Debug: log tilt state
+                if (_autoRotateDebug < 5 && mouseOver)
+                {
+                    _autoRotateDebug++;
+                    ModEntry.WriteLog($"[Tilt] rect=({rect.Position.X:F0},{rect.Position.Y:F0} {rect.Size.X:F0}x{rect.Size.Y:F0}) mouse=({_cachedMousePos.X:F0},{_cachedMousePos.Y:F0}) rel=({rel.X:F2},{rel.Y:F2})");
+                }
 
                 // Tilt driven by mouse position relative to card
                 // X drives horizontal tilt (card turns left/right around Y-axis)
@@ -4112,7 +4121,7 @@ public static class BridgeHandler
                 float curScaleX = body.Scale.X;
                 float curSkew = (float)body.Get("skew");
 
-                // Use the actual pivot from the bounding box center
+                // Pivot at the card visual center relative to body's local position
                 body.PivotOffset = center - body.GlobalPosition;
                 body.Scale = new Vector2(Mathf.Lerp(curScaleX, targetScaleX, 0.12f), 1.0f);
                 body.Set("skew", Mathf.Lerp(curSkew, targetSkew, 0.12f));
