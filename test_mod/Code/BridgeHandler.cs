@@ -4064,31 +4064,23 @@ public static class BridgeHandler
                 var body = ctrl.GetNodeOrNull<Control>("%CardContainer");
                 if (body == null) goto recurse;
 
-                // Get effective card rect by reading the Frame's rect BEFORE we apply any transform.
-                // Reset body transform temporarily to get unscaled rect.
-                var savedScale = body.Scale;
-                var savedSkew = (float)body.Get("skew");
-                body.Scale = Vector2.One;
-                body.Set("skew", 0f);
-
-                var frame = ctrl.GetNodeOrNull<TextureRect>("%Frame");
-                Rect2 rect;
-                if (frame != null)
+                // Card rect: use NCard's GlobalPosition as the card's CENTER point.
+                // The parent NCardHolder's scale determines the visual card size.
+                // Base card is 300x422. The holder scales it (0.8 for grid, 1.0+ for hover).
+                var cardCenter = ctrl.GlobalPosition;
+                float holderScale = 1.0f;
+                try
                 {
-                    rect = frame.GetGlobalRect();
+                    var holder = ctrl.GetParent();
+                    if (holder is Control holderCtrl)
+                        holderScale = Mathf.Max(holderCtrl.Scale.X, holderCtrl.Scale.Y);
                 }
-                else
-                {
-                    // Fallback
-                    var cardPos = ctrl.GlobalPosition;
-                    rect = new Rect2(cardPos.X - 150, cardPos.Y - 211, 300, 422);
-                }
+                catch { }
+                if (holderScale < 0.1f) holderScale = 0.8f;
 
-                // Restore transform
-                body.Scale = savedScale;
-                body.Set("skew", savedSkew);
-
-                if (rect.Size.X < 10 || rect.Size.Y < 10) goto recurse;
+                float hw = 150 * holderScale;  // half width
+                float hh = 211 * holderScale;  // half height
+                var rect = new Rect2(cardCenter.X - hw, cardCenter.Y - hh, hw * 2, hh * 2);
 
                 // Mouse position relative to card center, normalized -1..1
                 var center = rect.Position + rect.Size * 0.5f;
@@ -4125,24 +4117,28 @@ public static class BridgeHandler
 
                 float proximity = mouseOver ? 1.0f : 0.0f;
 
-                // Tilt driven by mouse position relative to card
-                // X drives horizontal tilt (card turns left/right around Y-axis)
-                // Uses Scale.X compression + skew for the 3D look
-                float tiltDeg = rel.X * 25.0f * proximity;
-                float tiltRad = tiltDeg * Mathf.Pi / 180.0f;
-                float cosA = Mathf.Cos(tiltRad);
-                float sinA = Mathf.Sin(tiltRad);
+                // Tilt: both X and Y axes
+                // Mouse left/right → card turns around vertical axis (Scale.X + skew)
+                // Mouse top/bottom → card tilts around horizontal axis (Scale.Y)
+                float tiltXDeg = rel.X * 25.0f * proximity;
+                float tiltYDeg = rel.Y * 15.0f * proximity;
 
-                float targetScaleX = cosA;
-                float targetSkew = sinA * 0.15f;
+                float tiltXRad = tiltXDeg * Mathf.Pi / 180.0f;
+                float tiltYRad = tiltYDeg * Mathf.Pi / 180.0f;
+
+                float targetScaleX = Mathf.Cos(tiltXRad);
+                float targetScaleY = Mathf.Cos(tiltYRad);
+                float targetSkew = Mathf.Sin(tiltXRad) * 0.15f;
 
                 // Smooth lerp
                 float curScaleX = body.Scale.X;
+                float curScaleY = body.Scale.Y;
                 float curSkew = (float)body.Get("skew");
 
-                // Pivot at the card visual center relative to body's local position
-                body.PivotOffset = center - body.GlobalPosition;
-                body.Scale = new Vector2(Mathf.Lerp(curScaleX, targetScaleX, 0.12f), 1.0f);
+                body.PivotOffset = cardCenter - body.GlobalPosition;
+                body.Scale = new Vector2(
+                    Mathf.Lerp(curScaleX, targetScaleX, 0.12f),
+                    Mathf.Lerp(curScaleY, targetScaleY, 0.12f));
                 body.Set("skew", Mathf.Lerp(curSkew, targetSkew, 0.12f));
 
                 // Update foil shader — drives rainbow shift and sparkle based on tilt
