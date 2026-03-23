@@ -116,6 +116,7 @@ public static class BridgeHandler
                 "autoslay_configure" => AutoSlayConfigure(root),
                 "navigate_menu" => MainThreadDispatcher.Invoke(() => NavigateMenu(root)),
                 "find_cards" => MainThreadDispatcher.Invoke(() => FindCards(root)),
+                "card_tilt_test" => MainThreadDispatcher.Invoke(() => CardTiltTest(root)),
                 "start_foil_tilt" => MainThreadDispatcher.Invoke(() => StartFoilTilt()),
                 "stop_foil_tilt" => MainThreadDispatcher.Invoke(() => StopFoilTilt()),
                 "click_node" => MainThreadDispatcher.Invoke(() => ClickNode(root)),
@@ -3969,6 +3970,127 @@ public static class BridgeHandler
         {
             try { FindCardsRecursive(node.GetChild(i), results, ref totalNodes, doRotate, rotation); }
             catch { }
+        }
+    }
+
+    // ─── Card Tilt Test ────────────────────────────────────────────────────
+
+    private static object CardTiltTest(JsonElement root)
+    {
+        try
+        {
+            float tiltX = 0f;
+            if (root.TryGetProperty("params", out var p) && p.TryGetProperty("tilt", out var tp))
+                tiltX = (float)tp.GetDouble();
+
+            var tree = GodotEngine.GetMainLoop() as SceneTree;
+            if (tree?.Root == null) return new { error = "no tree" };
+
+            var results = new List<object>();
+            CardTiltRecursive(tree.Root, results, tiltX);
+            return new { cards_processed = results.Count, cards = results };
+        }
+        catch (Exception ex) { return new { error = ex.Message }; }
+    }
+
+    private static readonly string TiltShaderCode = @"
+shader_type canvas_item;
+uniform float tilt_x = 0.0;
+uniform float tilt_y = 0.0;
+void fragment() {
+    vec2 c = UV - 0.5;
+    float persp = 1.0 + c.x * tilt_x + c.y * tilt_y * 0.5;
+    persp = max(persp, 0.15);
+    vec2 uv = vec2(c.x / persp, c.y / persp) + 0.5;
+    uv = clamp(uv, vec2(0.0), vec2(1.0));
+    float facing = clamp(1.0 + c.x * tilt_x * 0.5, 0.7, 1.3);
+    vec4 col = texture(TEXTURE, uv);
+    col.rgb *= facing;
+    COLOR = col;
+}
+";
+    private static Shader? _tiltShader;
+
+    private static void CardTiltRecursive(Node node, List<object> results, float tiltX)
+    {
+        if (node is MegaCrit.Sts2.Core.Nodes.Cards.NCard && node is Control card)
+        {
+            try
+            {
+                // Find the CardContainer (Body) — this holds ALL visual elements
+                var body = card.GetNodeOrNull<Control>("%CardContainer");
+                if (body == null)
+                {
+                    results.Add(new { name = card.Name.ToString(), error = "no CardContainer" });
+                    // List children to find the right one
+                    var childNames = new List<string>();
+                    for (int i = 0; i < card.GetChildCount(); i++)
+                    {
+                        var ch = card.GetChild(i);
+                        childNames.Add($"{ch.Name}({ch.GetType().Name} {ch.GetClass()})");
+                    }
+                    results.Add(new { children = childNames });
+                    return;
+                }
+
+                var info = new Dictionary<string, object?>
+                {
+                    ["name"] = card.Name.ToString(),
+                    ["body_size"] = $"{body.Size}",
+                    ["body_class"] = body.GetClass(),
+                    ["body_type"] = body.GetType().Name,
+                    ["body_material"] = body.Material?.GetType().Name,
+                };
+
+                if (Mathf.Abs(tiltX) > 0.01f)
+                {
+                    // Try setting material directly on the NCard node.
+                    // In Godot, a CanvasItem's material processes its own draw
+                    // but for Control nodes with size 0 this won't work alone.
+                    // Instead, set use_parent_material on all children and apply
+                    // the shader to the card.
+
+                    if (_tiltShader == null)
+                    {
+                        _tiltShader = new Shader();
+                        _tiltShader.Code = TiltShaderCode;
+                    }
+
+                    // Apply shader to CardContainer (Body)
+                    var mat = body.Material as ShaderMaterial;
+                    if (mat == null || mat.Shader != _tiltShader)
+                    {
+                        mat = new ShaderMaterial();
+                        mat.Shader = _tiltShader;
+                        body.Material = mat;
+                    }
+                    mat.SetShaderParameter("tilt_x", tiltX);
+
+                    // Set use_parent_material on direct children so they inherit
+                    for (int ci = 0; ci < body.GetChildCount(); ci++)
+                    {
+                        var ch = body.GetChild(ci);
+                        if (ch is CanvasItem ci2)
+                            ci2.UseParentMaterial = true;
+                    }
+
+                    info["tilt_applied"] = tiltX;
+                    info["method"] = "use_parent_material";
+                }
+
+                results.Add(info);
+            }
+            catch (Exception ex)
+            {
+                results.Add(new { name = card.Name.ToString(), error = ex.Message });
+            }
+        }
+
+        int count;
+        try { count = node.GetChildCount(); } catch { return; }
+        for (int i = 0; i < count; i++)
+        {
+            try { CardTiltRecursive(node.GetChild(i), results, tiltX); } catch { }
         }
     }
 
