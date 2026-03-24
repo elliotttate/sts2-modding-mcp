@@ -1,5 +1,14 @@
 # Programmatic Godot UI Construction
 
+## Using .tscn Scene Files with Mod Scripts
+
+If you create `.tscn` scenes in Godot that reference C# scripts from your mod, you **must** register your assembly during mod initialization:
+```csharp
+var assembly = Assembly.GetExecutingAssembly();
+Godot.Bridge.ScriptManagerBridge.LookupScriptsInAssembly(assembly);
+```
+Without this, Godot won't find your mod's script classes when instantiating scenes. This is only needed when scene files reference your mod's scripts — purely programmatic UI doesn't need it.
+
 ## Creating Controls in C# (No .tscn Required)
 Most STS2 mods build UI entirely in C# code, avoiding scene files.
 

@@ -573,22 +573,119 @@ def resolve_config() -> tuple[str, str]:
     return game_dir, decompiled_dir
 
 
+def _ensure_builtin_mods(game_dir: str) -> None:
+    """Build and install built-in mods (MCPTest, GodotExplorer) if not already installed.
+
+    Runs silently on startup — only writes to stderr for logging. Requires
+    dotnet SDK to be available. If dotnet is missing the step is skipped.
+    """
+    if not shutil.which("dotnet"):
+        return
+
+    mods_dir = os.path.join(game_dir, "mods")
+    os.makedirs(mods_dir, exist_ok=True)
+
+    builtin_mods = [
+        {
+            "source": PROJECT_ROOT / "test_mod",
+            "mod_id": "mcptest",
+            "assembly": "MCPTest",
+            "csproj": "MCPTest.csproj",
+        },
+        {
+            "source": PROJECT_ROOT / "explorer_mod",
+            "mod_id": "godotexplorer",
+            "assembly": "GodotExplorer",
+            "csproj": "GodotExplorer.csproj",
+        },
+    ]
+
+    for mod in builtin_mods:
+        source_dir = mod["source"]
+        csproj = source_dir / mod["csproj"]
+        if not csproj.exists():
+            continue
+
+        target_dir = Path(mods_dir) / mod["mod_id"]
+        target_dll = target_dir / f"{mod['assembly']}.dll"
+
+        # Skip if already installed and source hasn't changed
+        if target_dll.exists():
+            # Quick staleness check: compare source mod time vs installed DLL
+            src_mtime = max(
+                (f.stat().st_mtime for f in source_dir.rglob("*.cs") if f.is_file()),
+                default=0,
+            )
+            if target_dll.stat().st_mtime >= src_mtime:
+                continue
+
+        print(f"[sts2mcp] Building {mod['assembly']}...", file=sys.stderr)
+        env = {**os.environ, "STS2_GAME_DIR": game_dir}
+        try:
+            result = subprocess.run(
+                ["dotnet", "build", str(csproj), "-c", "Debug"],
+                cwd=str(source_dir),
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=120,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            print(f"[sts2mcp] Failed to build {mod['assembly']} — skipping", file=sys.stderr)
+            continue
+
+        if result.returncode != 0:
+            print(f"[sts2mcp] Build failed for {mod['assembly']}: {result.stderr[-200:]}", file=sys.stderr)
+            continue
+
+        # Find built DLL
+        bin_dir = source_dir / "bin" / "Debug" / "net9.0"
+        built_dll = bin_dir / f"{mod['assembly']}.dll"
+        if not built_dll.exists():
+            # Try without framework subdir
+            bin_dir = source_dir / "bin" / "Debug"
+            built_dll = bin_dir / f"{mod['assembly']}.dll"
+        if not built_dll.exists():
+            print(f"[sts2mcp] Built DLL not found for {mod['assembly']} — skipping", file=sys.stderr)
+            continue
+
+        # Deploy
+        target_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(built_dll, target_dll)
+        # Copy PDB if it exists
+        pdb = built_dll.with_suffix(".pdb")
+        if pdb.exists():
+            shutil.copy2(pdb, target_dir / pdb.name)
+        # Copy manifest
+        manifest = source_dir / "mod_manifest.json"
+        if manifest.exists():
+            shutil.copy2(manifest, target_dir / "mod_manifest.json")
+
+        print(f"[sts2mcp] Installed {mod['assembly']} → {target_dir}", file=sys.stderr)
+
+
 def auto_detect_on_startup() -> None:
     """Lightweight auto-detection for server startup. Writes to stderr only."""
     config = load_config()
 
-    # If we already have a saved config with a valid game dir, nothing to do
-    if config.get("game_dir") and os.path.isdir(config["game_dir"]):
-        return
+    game_dir = config.get("game_dir")
 
-    # Try to find the game
-    game_dir = find_game_install()
-    if game_dir:
-        config["game_dir"] = game_dir
-        save_config(config)
-        print(f"[sts2mcp] Game found: {game_dir}", file=sys.stderr)
-    else:
-        print("[sts2mcp] Game not found -- set STS2_GAME_DIR or run: python -m sts2mcp.setup", file=sys.stderr)
+    # If we don't have a saved config with a valid game dir, try to find one
+    if not game_dir or not os.path.isdir(game_dir):
+        game_dir = find_game_install()
+        if game_dir:
+            config["game_dir"] = game_dir
+            save_config(config)
+            print(f"[sts2mcp] Game found: {game_dir}", file=sys.stderr)
+        else:
+            print("[sts2mcp] Game not found -- set STS2_GAME_DIR or run: python -m sts2mcp.setup", file=sys.stderr)
+
+    # Auto-build and install built-in mods (MCPTest + GodotExplorer)
+    if game_dir and os.path.isdir(game_dir):
+        try:
+            _ensure_builtin_mods(game_dir)
+        except Exception as exc:
+            print(f"[sts2mcp] Mod auto-install failed: {exc}", file=sys.stderr)
 
     # Check decompiled state
     decomp = check_decompiled(config.get("decompiled_dir"))

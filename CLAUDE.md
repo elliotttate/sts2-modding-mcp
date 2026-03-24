@@ -20,13 +20,15 @@ sts2mcp/
   game_data.py       — Decompiled source indexer (loads Roslyn JSON index or falls back to regex)
   analysis.py        — Code intelligence (call graphs, patch suggestions, validation)
   bridge_client.py   — TCP JSON-RPC client to in-game MCPTest mod (port 21337)
+  godot_explorer_client.py — TCP MCP client to in-game GodotExplorer mod (port 27020)
   pck_builder.py     — Pure Python Godot PCK builder
   character_assets.py — Character asset scaffolding
   templates/         — 43 C# template files (*.cs.tpl) with {placeholder} format strings
   docs/guides/       — 29 modding guide markdown files (loaded by get_modding_guide)
   docs/baselib/      — 15 BaseLib reference markdown files
 tools/roslyn_analyzer/ — C# Roslyn-based source analyzer (outputs roslyn_index.json)
-test_mod/            — MCPTest bridge mod (C# source, runs inside the game)
+test_mod/            — MCPTest bridge mod (C# source, runs inside the game, port 21337)
+explorer_mod/        — GodotExplorer scene inspector mod (C# source, runs inside the game, port 27020)
 tests/               — pytest suite (generators, analysis, bridge, server, integration)
 decompiled/          — Decompiled C# source from sts2.dll (gitignored, ~23MB)
 ```
@@ -37,6 +39,8 @@ decompiled/          — Decompiled C# source from sts2.dll (gitignored, ~23MB)
 - **Generators return dicts.** Every `generate_*` method returns `{"source": str, "file_name": str, "folder": str, ...}`. Some include `"extra_files"` (list of additional dicts), `"localization"` (dict of filename → entries), and `"notes"` (list of strings).
 - **Tool registration pattern.** Each tool needs: (1) a `types.Tool()` definition in `list_tools()`, (2) an `elif name == "tool_name":` handler in `_handle_tool()`, and (3) the actual implementation in a module method. Test `TestHandlerCoverage` verifies 1:1 alignment.
 - **Bridge protocol.** Python sends JSON-RPC over TCP to port 21337. The C# `BridgeHandler.HandleRequest()` dispatches via a switch expression. Adding a bridge method requires changes to both `bridge_client.py` and `test_mod/Code/BridgeHandler.cs`.
+- **Explorer protocol.** Python sends MCP JSON-RPC (`tools/call`) over TCP to port 27020. The C# `MCPServer` in `explorer_mod/` dispatches to `MCPTools.ExecuteTool()`. Adding an explorer tool requires changes to both `godot_explorer_client.py` and `explorer_mod/src/MCP/MCPTools.cs`.
+- **Built-in mod auto-install.** Both `test_mod/` and `explorer_mod/` are automatically built and deployed to the game's `mods/` folder on server startup via `setup.py:_ensure_builtin_mods()`. They are rebuilt when source `.cs` files change.
 - **Brace escaping in templates.** Template `.cs.tpl` files use Python `.format()` — literal C# braces must be doubled: `{{` / `}}`. Format placeholders use single braces: `{class_name}`.
 
 ## Running tests

@@ -148,6 +148,61 @@ bridge_restore_snapshot(name="before_boss")
 - `bridge_get_state_diff()` — What changed since last check
 - `bridge_capture_screenshot()` — Visual state capture
 
+## Console Command Test Harness
+For complex UI flows that bridge actions can't drive (e.g., bundle selection screens, custom overlays), create a custom console command that runs the test end-to-end:
+
+```csharp
+using Godot;
+using MegaCrit.Sts2.Core.DevConsole;
+using MegaCrit.Sts2.Core.DevConsole.ConsoleCommands;
+using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.Nodes;
+using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
+using MegaCrit.Sts2.Core.Runs;
+
+public class TestMyRelicCmd : AbstractConsoleCmd
+{
+    public override string CmdName => "test_my_relic";
+    public override string Args => "";
+    public override string Description => "End-to-end test of MyRelic pickup flow";
+    public override bool IsNetworked => true;
+
+    public override CmdResult Process(Player? issuingPlayer, string[] args)
+    {
+        if (issuingPlayer == null || !RunManager.Instance.IsInProgress)
+            return new CmdResult(false, "No run in progress");
+        Task task = RunTest(issuingPlayer);
+        return new CmdResult(task, true, "Running test...");
+    }
+
+    private static async Task RunTest(Player player)
+    {
+        // Schedule UI auto-clicks on the main thread via timers
+        var tree = NGame.Instance!.GetTree();
+        tree.CreateTimer(1.5).Connect("timeout", Callable.From(() =>
+        {
+            // Find and click a button using ForceClick
+            var screen = tree.Root.FindChild("MyScreen", true, false) as Control;
+            var hitbox = screen?.FindChild("Hitbox", false, false) as NClickableControl;
+            hitbox?.ForceClick();  // Emits Released signal directly
+        }));
+
+        // This awaits the UI interaction scheduled above
+        await MyAsyncOperation(player);
+        Log.Info("[Test] PASSED!");
+    }
+}
+```
+
+### Key Pattern: NClickableControl.ForceClick()
+`NClickableControl.ForceClick()` emits the `Released` signal directly, bypassing mouse/keyboard input handling. Use it for programmatic UI interaction from console commands or test harnesses. Schedule calls on the main thread via `SceneTree.CreateTimer()` + `Callable.From()` since async tasks run on thread pool threads.
+
+### Console Command Testing Tips
+- Commands extending `AbstractConsoleCmd` are **auto-discovered** — no registration needed
+- Return `CmdResult(task, true, msg)` to run async operations through the game's action queue
+- Use `Log.Info("[TestName] Step N: ...")` for progress tracking via `bridge_get_game_log`
+- `relic add` skips `AfterObtained()` — use `RelicCmd.Obtain(relic.ToMutable(), player)` instead
+
 ## Recommended Test Workflow
 1. **During development**: Bridge actions + hot swap for fast iteration
 2. **Before release**: AutoSlay smoke test (5+ runs per character)

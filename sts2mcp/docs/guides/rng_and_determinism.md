@@ -39,6 +39,20 @@ int relicSeed = baseSeed + 200;  // Relic rewards
 int combatSeed = baseSeed + 300; // Combat encounters
 ```
 
+## Pitfall: NextItem Throws on Empty Lists
+`Rng.NextItem(list)` and `Rng.Choose(list)` **throw** when the list is empty — they do not return `null` or `default`. The exception message is `"Attempted to roll on empty WeightedList"`. Always guard with a count check:
+```csharp
+// WRONG — throws if movePacks is empty
+var pack = rng.NextItem(movePacks);
+if (pack == null) break;  // Never reached!
+
+// RIGHT — check before calling
+if (movePacks.Count == 0) break;
+var pack = rng.NextItem(movePacks);
+```
+
+This is especially important in loops that consume items from a list (pick + remove patterns), where the list may empty before the loop ends.
+
 ## Determinism Tips
 - Never use System.Random — it's not deterministic across saves
 - Always use the game's Rng class

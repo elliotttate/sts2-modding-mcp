@@ -72,6 +72,20 @@ Without this, the game can't load the mod DLL.
 - **Modifiers:** Need the registration patch on `ModelDb.get_GoodModifiers`/`get_BadModifiers`
 - **Localization:** Check JSON files are in `<ModName>/localization/eng/` and `has_pck: true` in manifest
 
+### Godot scene scripts not found / "Script not found" errors
+If you create `.tscn` scenes in Godot that attach C# scripts from your mod, you must register your assembly with Godot's script bridge during mod initialization:
+```csharp
+public static void Initialize()
+{
+    var assembly = Assembly.GetExecutingAssembly();
+    Godot.Bridge.ScriptManagerBridge.LookupScriptsInAssembly(assembly);
+
+    Harmony harmony = new(ModId);
+    harmony.PatchAll();
+}
+```
+Without this, Godot won't find your mod's script classes when instantiating scenes.
+
 ### Null reference exception in hooks
 - Models must be accessed after initialization — don't read `ModelDb` in static constructors
 - `Owner` may be null if the entity isn't attached to a player yet
@@ -104,6 +118,21 @@ Without this, the game can't load the mod DLL.
 - Check `bridge_get_available_actions` — the action might not be legal
 - Combat actions only work during `COMBAT_PLAYER_TURN`
 - Map navigation only works on `MAP` screen
+
+### Card plays silently fail (card stays in hand)
+If `PlayCardAction` fails silently, the card remains in the player's hand at the same index. Common causes:
+- **Wrong targeting**: Self-targeting cards (Defend, Powers) passed with an enemy target — check `card.TargetType` before resolving targets
+- **Star cost not checked**: Regent cards with star costs may report `CanPlay() == true` but fail at play time — manually check `PlayerCombatState.Stars >= starCost`
+- **Action executor stalled**: A previous action is still running — call `WaitForActionExecutor()` before queueing new actions
+
+### Potion targeting issues
+Self-targeting potions (Flex Potion, Fortifier) must always target the player's creature, regardless of any enemy target provided. Check `potion.TargetType` first:
+- `Self` / `TargetedNoCreature` → always target `player.Creature`
+- `AnyEnemy` → use the selected enemy target
+- `None` / `All` → target is null (game handles)
+
+### Async deadlocks during EndTurn or enemy actions
+`Task.Yield()` and `Cmd.Wait()` can cause deadlocks when async continuations don't complete. See the `advanced_harmony` guide for patterns to suppress yields during critical sections and patch `Cmd.Wait()` for testing/headless contexts.
 
 ## Common Code Patterns
 

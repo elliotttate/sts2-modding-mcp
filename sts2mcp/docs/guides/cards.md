@@ -185,6 +185,36 @@ await CardPileCmd.Draw(Owner, (int)DynamicVars.MagicNumber.BaseValue, choiceCont
 await CardPileCmd.Discard(Owner, (int)DynamicVars.MagicNumber.BaseValue, choiceContext);
 ```
 
+## Targeting Rules
+
+When implementing `OnPlay`, understand how `TargetType` determines targeting:
+
+| TargetType | `cardPlay.Target` | What to do |
+|---|---|---|
+| `AnyEnemy` | The selected enemy | Use `cardPlay.Target` directly |
+| `AllEnemies` | `null` | Loop over all alive enemies |
+| `RandomEnemy` | `null` | Game selects random target |
+| `Self` | `null` | Use `Owner.Creature` |
+| `AnyAlly` | The selected ally | Use `cardPlay.Target` |
+| `AllAllies` | `null` | Loop over all allies |
+| `None` | `null` | No target needed |
+
+**Critical pitfall**: Self-targeting cards (Defend, Powers, etc.) have `Target = null`. Always check `TargetType` before using `cardPlay.Target`:
+```csharp
+protected override async Task OnPlay(PlayerChoiceContext ctx, CardPlay play)
+{
+    // WRONG: This crashes for Self-targeting cards
+    await DamageCmd.Attack(8).Targeting(play.Target).Execute(ctx);
+
+    // RIGHT: Check target type
+    if (TargetType == TargetType.AnyEnemy)
+    {
+        ArgumentNullException.ThrowIfNull(play.Target);
+        await DamageCmd.Attack(8).FromCard(this).Targeting(play.Target).Execute(ctx);
+    }
+}
+```
+
 ## Card Keywords
 Override `CanonicalKeywords` to add keywords:
 ```csharp

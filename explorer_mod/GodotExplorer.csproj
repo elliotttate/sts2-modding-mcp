@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>GodotExplorer</RootNamespace>
+    <AssemblyName>GodotExplorer</AssemblyName>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Set STS2_GAME_DIR env var or pass /p:Sts2GameDir=... to override -->
+    <Sts2GameDir Condition="'$(Sts2GameDir)' == ''">$(STS2_GAME_DIR)</Sts2GameDir>
+    <!-- Platform-specific data subfolder names -->
+    <Sts2DataDir Condition="$([MSBuild]::IsOSPlatform('Windows'))">data_sts2_windows_x86_64</Sts2DataDir>
+    <Sts2DataDir Condition="$([MSBuild]::IsOSPlatform('Linux')) And Exists('$(Sts2GameDir)/data_sts2_linuxbsd_x86_64')">data_sts2_linuxbsd_x86_64</Sts2DataDir>
+    <Sts2DataDir Condition="$([MSBuild]::IsOSPlatform('Linux')) And '$(Sts2DataDir)' == ''">data_sts2_linux_x86_64</Sts2DataDir>
+    <Sts2DataDir Condition="$([MSBuild]::IsOSPlatform('OSX'))">data_sts2_macos_arm64</Sts2DataDir>
+    <Sts2Dir>$(Sts2GameDir)/$(Sts2DataDir)</Sts2Dir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="GodotSharp" Version="4.4.0" />
+    <PackageReference Include="Lib.Harmony" Version="2.4.2" />
+    <!-- Roslyn C# Scripting is loaded dynamically at runtime via reflection,
+         not referenced at compile time. This avoids breaking the game's mod
+         loader type scanner. -->
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="sts2">
+      <HintPath>$(Sts2Dir)/sts2.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

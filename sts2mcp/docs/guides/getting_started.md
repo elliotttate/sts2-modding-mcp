@@ -2,15 +2,39 @@
 
 ## Prerequisites
 - .NET SDK 9.0+
-- Godot 4.5.1 (for PCK export only)
+- Godot 4.5.1 / MegaDot 4.5.1 (for PCK export only)
 - The game: Slay the Spire 2
+- C# IDE: Rider (recommended) or Visual Studio
 
-## Quick Start
+## Quick Start (MCP Workflow)
 1. Use `create_mod_project` to scaffold a new mod
 2. Add content using `generate_card`, `generate_relic`, etc.
 3. Build with `build_mod`
 4. Install with `install_mod`
 5. Test in-game with the developer console (backtick key)
+
+## Built-in Mods (Auto-Installed)
+The MCP automatically builds and installs two companion mods into the game on first startup:
+- **MCPTest** — Bridge mod for live game interaction (port 21337). Powers all `bridge_*` tools: play cards, navigate menus, query game state, run console commands.
+- **GodotExplorer** — Scene inspector and debugger (port 27020). Powers all `explorer_*` tools: inspect the live scene tree, read/write node properties, search types, animate tweens. Press F12 in-game to toggle the visual inspector UI.
+
+Both mods are rebuilt automatically when source changes are detected. No manual build steps required.
+
+## Alternative: NuGet Template Workflow
+If working outside the MCP, use Alchyr's official mod templates:
+```bash
+dotnet new install Alchyr.Sts2.Templates
+```
+Three templates are available:
+- **alchyrsts2mod** — Basic mod with BaseLib dependency
+- **alchyrsts2content** — Content-only mod (cards, relics, powers)
+- **alchyrsts2character** — Full character mod with pools and UI assets
+
+Create a project (Rider recommended — enable "Put solution and project in same directory"):
+```bash
+dotnet new alchyrsts2mod --name MyMod --ModAuthor "YourName"
+```
+Then update `GodotPath` and `SteamLibraryPath` in the `.csproj` for your platform.
 
 ## Key Concepts
 - **sts2.dll**: The game's compiled C# code at `data_sts2_windows_x86_64/sts2.dll`

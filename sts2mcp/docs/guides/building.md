@@ -1,5 +1,9 @@
 # Building & Deploying Mods
 
+## Built-in Mods (Zero Setup)
+
+The MCP ships with two companion mods (`test_mod/` and `explorer_mod/`) that are automatically built and installed into the game's `mods/` folder on server startup. They are rebuilt when source changes are detected. No manual steps are needed.
+
 ## Standard Build & Deploy Flow
 
 ```
@@ -74,6 +78,15 @@ validate_mod(project_dir="E:/mods/MyMod")
 ```
 
 Checks: manifest exists, .csproj references, [ModInitializer] present, localization coverage, Harmony patch validity, async correctness.
+
+## Build vs Publish (Template Projects)
+
+If using Alchyr's NuGet templates with Rider/Visual Studio, there are two workflows:
+
+- **Build** (hammer icon / `dotnet build`): Fast — only compiles C# code to `.dll`. Use during development when you haven't changed resource files.
+- **Publish** (right-click → Publish → Local folder): Compiles C# code AND exports the Godot `.pck` via headless Godot (`--export-pack`). **Required whenever you modify resource files** (images, localization, scenes).
+
+The template `.csproj` includes a `CopyToModsFolderOnBuild` target that auto-copies the DLL and manifest to the game's `mods/` folder on build.
 
 ## Manual Fallback
 

@@ -66,5 +66,16 @@ For testing without rebuilding the PCK, place JSON files in:
 ```
 These are merged into the base tables at startup. Useful for rapid iteration.
 
+## Analyzer-Based Localization Generation
+
+If using BaseLib with the `Alchyr.Sts2.ModAnalyzers` NuGet package, missing localization keys are detected as code warnings. In Rider or Visual Studio:
+
+1. Hover over a class name with a missing localization warning
+2. Click the class name and press **Alt+Enter**
+3. Select **"Generate localization"**
+4. Cut the generated JSON text and paste into the appropriate localization file (e.g., `cards.json`)
+
+The analyzer supports cards, relics, ancients, powers, and other content types. Keep the analyzer package up-to-date to get the latest supported types.
+
 ## Languages
 eng, zhs, deu, esp, fra, ita, jpn, kor, pol, ptb, rus, spa, tha, tur

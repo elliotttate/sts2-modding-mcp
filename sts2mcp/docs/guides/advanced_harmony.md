@@ -98,6 +98,99 @@ static bool BlockSave(ref bool __result)
 }
 ```
 
+## Async Deadlock Patterns
+
+STS2 is heavily async — card effects, enemy turns, and room transitions all use `async Task`. When patching async code, be aware of these common deadlocks:
+
+### Task.Yield() Deadlocks
+`Task.Yield()` posts continuations to the ThreadPool. In certain contexts (headless testing, custom synchronization), these continuations never complete:
+```csharp
+// PROBLEM: This can deadlock if the SynchronizationContext doesn't process ThreadPool work
+await Task.Yield();  // Posts continuation to ThreadPool, may never resume
+
+// SOLUTION: Patch YieldAwaitable.YieldAwaiter.IsCompleted to short-circuit
+[HarmonyPrefix]
+[HarmonyPatch(typeof(YieldAwaitable.YieldAwaiter), "get_IsCompleted")]
+static bool ForceYieldComplete(ref bool __result)
+{
+    __result = true;   // Makes await Task.Yield() complete immediately
+    return false;
+}
+```
+
+Use a volatile flag to control when yield suppression is active (e.g., only during EndTurn processing):
+```csharp
+public static volatile bool SuppressYield;
+
+static bool IsCompletedPrefix(ref bool __result)
+{
+    if (SuppressYield) { __result = true; return false; }
+    return true;  // Normal behavior when not suppressing
+}
+
+// Usage: wrap critical sections
+SuppressYield = true;
+try { PlayerCmd.EndTurn(player, canBackOut: false); }
+finally { SuppressYield = false; }
+```
+
+### Cmd.Wait() Deadlocks
+`Cmd.Wait(float)` creates a SceneTreeTimer for UI animation delays. In headless or testing contexts without a Godot SceneTree, this never completes:
+```csharp
+// PROBLEM: Status cards (Wound, Dazed) added via CardPileCmd.AddToCombatAndPreview()
+// call Cmd.Wait(1f) for the preview animation — hangs in headless mode
+
+// SOLUTION: Patch Cmd.Wait to return immediately
+[HarmonyPrefix]
+static bool CmdWaitPrefix(ref Task __result)
+{
+    __result = Task.CompletedTask;
+    return false;
+}
+```
+
+### InlineSynchronizationContext
+For forcing async game code to run synchronously (e.g., in tests or tools), use a custom SynchronizationContext that executes continuations inline:
+```csharp
+internal class InlineSynchronizationContext : SynchronizationContext
+{
+    private readonly Queue<(SendOrPostCallback, object?)> _queue = new();
+    private bool _executing;
+
+    public override void Post(SendOrPostCallback d, object? state)
+    {
+        if (_executing) { _queue.Enqueue((d, state)); return; }
+        _executing = true;
+        try
+        {
+            d(state);
+            while (_queue.Count > 0) { var (cb, st) = _queue.Dequeue(); cb(st); }
+        }
+        finally { _executing = false; }
+    }
+
+    public override void Send(SendOrPostCallback d, object? state) => d(state);
+
+    public void Pump()  // Call after async operations to drain queued callbacks
+    {
+        while (_queue.Count > 0)
+        {
+            var (cb, st) = _queue.Dequeue();
+            _executing = true;
+            try { cb(st); } finally { _executing = false; }
+        }
+    }
+}
+```
+
+Install it before running game code:
+```csharp
+var syncCtx = new InlineSynchronizationContext();
+SynchronizationContext.SetSynchronizationContext(syncCtx);
+// ... run async game code synchronously ...
+syncCtx.Pump();  // Drain any remaining callbacks
+```
+
 ## Common OpCodes
 - `Ldc_I4` / `Ldc_I4_S` - Load integer constant
 - `Callvirt` / `Call` - Method calls

@@ -1,0 +1,11 @@
+{
+  "id": "godotexplorer",
+  "pck_name": "GodotExplorer",
+  "name": "Godot Explorer",
+  "author": "elliotttate",
+  "description": "Runtime scene explorer and visual debugger for STS2 modding MCP. Press F12 to toggle.",
+  "version": "1.0.0",
+  "has_pck": false,
+  "has_dll": true,
+  "affects_gameplay": false
+}

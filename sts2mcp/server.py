@@ -236,6 +236,7 @@ async def list_tools() -> list[types.Tool]:
                             "enchantments", "orbs", "game_actions",
                             "overlays", "dynamic_vars", "mechanics",
                             "vfx_scenes", "ui_elements", "fastmp",
+                            "console_commands",
                         ],
                     },
                 },
@@ -2869,6 +2870,211 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {},
             },
         ),
+        # ── Godot Explorer (live scene inspection via GodotExplorer mod, port 27020) ──
+        types.Tool(
+            name="explorer_get_scene_tree",
+            description=(
+                "Get the live Godot scene tree hierarchy as JSON. Returns node names, types, "
+                "paths, child counts, visibility, and size/position for Control nodes. "
+                "Requires GodotExplorer mod running in the game."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "depth": {"type": "integer", "default": 3, "description": "Max depth to traverse"},
+                    "root_path": {"type": "string", "default": "/root", "description": "Root node path to start from"},
+                },
+            },
+        ),
+        types.Tool(
+            name="explorer_find_nodes",
+            description=(
+                "Find nodes in the live scene tree by name pattern or type. "
+                "Supports * wildcards (e.g. '*Card*', '*Button*'). "
+                "Requires GodotExplorer mod running in the game."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Name pattern to search (supports * wildcards)"},
+                    "type": {"type": "string", "description": "Class type filter (e.g. Control, Sprite2D, NCard)"},
+                    "limit": {"type": "integer", "default": 50, "description": "Max results"},
+                },
+                "required": ["pattern"],
+            },
+        ),
+        types.Tool(
+            name="explorer_inspect_node",
+            description=(
+                "Get detailed info about a live Godot node: all properties (with values, types, "
+                "categories), class name, children list. Use explorer_find_nodes or "
+                "explorer_get_scene_tree first to find node paths. "
+                "Requires GodotExplorer mod running in the game."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Node path (e.g. /root/Game/CombatRoom)"},
+                },
+                "required": ["path"],
+            },
+        ),
+        types.Tool(
+            name="explorer_get_property",
+            description=(
+                "Get a specific property value from a live Godot node. "
+                "Requires GodotExplorer mod running in the game."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Node path"},
+                    "property": {"type": "string", "description": "Property name"},
+                },
+                "required": ["path", "property"],
+            },
+        ),
+        types.Tool(
+            name="explorer_set_property",
+            description=(
+                "Set a property value on a live Godot node. Value is auto-parsed to the "
+                "correct type (bool/int/float/string). "
+                "Requires GodotExplorer mod running in the game."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Node path"},
+                    "property": {"type": "string", "description": "Property name"},
+                    "value": {"type": "string", "description": "Value to set (auto-parsed to correct type)"},
+                },
+                "required": ["path", "property", "value"],
+            },
+        ),
+        types.Tool(
+            name="explorer_call_method",
+            description=(
+                "Call a method on a live Godot node by name. "
+                "Requires GodotExplorer mod running in the game."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Node path"},
+                    "method": {"type": "string", "description": "Method name"},
+                    "args": {"type": "string", "description": "Comma-separated arguments (optional)"},
+                },
+                "required": ["path", "method"],
+            },
+        ),
+        types.Tool(
+            name="explorer_toggle_visibility",
+            description=(
+                "Toggle visibility of a CanvasItem node (Control, Sprite2D, etc.) in the live scene. "
+                "Requires GodotExplorer mod running in the game."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Node path"},
+                },
+                "required": ["path"],
+            },
+        ),
+        types.Tool(
+            name="explorer_get_node_count",
+            description=(
+                "Get total node count in the live Godot scene tree. "
+                "Requires GodotExplorer mod running in the game."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="explorer_list_groups",
+            description=(
+                "List all nodes in a specific Godot group, or list all group names if no group specified. "
+                "Requires GodotExplorer mod running in the game."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "group": {"type": "string", "description": "Group name (optional — omit to list all groups)"},
+                },
+            },
+        ),
+        types.Tool(
+            name="explorer_get_game_info",
+            description=(
+                "Get game engine info: Godot version, FPS, window size, node count, process name. "
+                "Requires GodotExplorer mod running in the game."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="explorer_list_assemblies",
+            description=(
+                "List all loaded .NET assemblies in the running game with version and type counts. "
+                "Useful for discovering what's loaded at runtime. "
+                "Requires GodotExplorer mod running in the game."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="explorer_search_types",
+            description=(
+                "Search for .NET types across all loaded assemblies in the running game. "
+                "Case-insensitive partial match. Returns up to 50 results with full names. "
+                "Requires GodotExplorer mod running in the game."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Type name to search for (partial match)"},
+                },
+                "required": ["query"],
+            },
+        ),
+        types.Tool(
+            name="explorer_inspect_type",
+            description=(
+                "Get detailed info about a .NET type in the running game: methods, properties, "
+                "base type, assembly. Use explorer_search_types first to find type names. "
+                "Requires GodotExplorer mod running in the game."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "type_name": {"type": "string", "description": "Fully qualified type name (or short name)"},
+                },
+                "required": ["type_name"],
+            },
+        ),
+        types.Tool(
+            name="explorer_tween_property",
+            description=(
+                "Animate a Godot node property over time using a Tween. Supports looping "
+                "and multiple transition types (linear, sine, quad, cubic, back, bounce, elastic). "
+                "Requires GodotExplorer mod running in the game."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Node path"},
+                    "property": {"type": "string", "description": "Property to animate (e.g. rotation, modulate, position)"},
+                    "to": {"type": "string", "description": "End value"},
+                    "from": {"type": "string", "description": "Start value (defaults to current)"},
+                    "duration": {"type": "string", "default": "1.0", "description": "Duration in seconds"},
+                    "loops": {"type": "integer", "default": 0, "description": "Number of loops (0 = infinite)"},
+                    "trans": {
+                        "type": "string",
+                        "default": "linear",
+                        "enum": ["linear", "sine", "quad", "cubic", "back", "bounce", "elastic"],
+                        "description": "Transition type",
+                    },
+                },
+                "required": ["path", "property", "to"],
+            },
+        ),
     ]
 
 
@@ -3995,6 +4201,81 @@ async def _handle_tool(name: str, args: dict):
                 ],
             }
         return profiles
+
+    # ── Godot Explorer (live scene inspection) ──
+    elif name == "explorer_get_scene_tree":
+        from . import godot_explorer_client as explorer
+        return await _call_bridge(
+            explorer.get_scene_tree,
+            depth=args.get("depth", 3),
+            root_path=args.get("root_path", "/root"),
+        )
+
+    elif name == "explorer_find_nodes":
+        from . import godot_explorer_client as explorer
+        return await _call_bridge(
+            explorer.find_nodes,
+            pattern=args["pattern"],
+            type_filter=args.get("type", ""),
+            limit=args.get("limit", 50),
+        )
+
+    elif name == "explorer_inspect_node":
+        from . import godot_explorer_client as explorer
+        return await _call_bridge(explorer.inspect_node, args["path"])
+
+    elif name == "explorer_get_property":
+        from . import godot_explorer_client as explorer
+        return await _call_bridge(explorer.get_property, args["path"], args["property"])
+
+    elif name == "explorer_set_property":
+        from . import godot_explorer_client as explorer
+        return await _call_bridge(explorer.set_property, args["path"], args["property"], args["value"])
+
+    elif name == "explorer_call_method":
+        from . import godot_explorer_client as explorer
+        return await _call_bridge(explorer.call_method, args["path"], args["method"], args.get("args", ""))
+
+    elif name == "explorer_toggle_visibility":
+        from . import godot_explorer_client as explorer
+        return await _call_bridge(explorer.toggle_visibility, args["path"])
+
+    elif name == "explorer_get_node_count":
+        from . import godot_explorer_client as explorer
+        return await _call_bridge(explorer.get_node_count)
+
+    elif name == "explorer_list_groups":
+        from . import godot_explorer_client as explorer
+        return await _call_bridge(explorer.list_groups, args.get("group", ""))
+
+    elif name == "explorer_get_game_info":
+        from . import godot_explorer_client as explorer
+        return await _call_bridge(explorer.get_game_info)
+
+    elif name == "explorer_list_assemblies":
+        from . import godot_explorer_client as explorer
+        return await _call_bridge(explorer.list_assemblies)
+
+    elif name == "explorer_search_types":
+        from . import godot_explorer_client as explorer
+        return await _call_bridge(explorer.search_types, args["query"])
+
+    elif name == "explorer_inspect_type":
+        from . import godot_explorer_client as explorer
+        return await _call_bridge(explorer.inspect_type, args["type_name"])
+
+    elif name == "explorer_tween_property":
+        from . import godot_explorer_client as explorer
+        return await _call_bridge(
+            explorer.tween_property,
+            path=args["path"],
+            property_name=args["property"],
+            to=args["to"],
+            from_val=args.get("from", ""),
+            duration=args.get("duration", "1.0"),
+            loops=args.get("loops", 0),
+            trans=args.get("trans", "linear"),
+        )
 
     else:
         return f"Unknown tool: {name}"
