@@ -6,6 +6,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
@@ -13,6 +14,7 @@ using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.Relics;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Saves;
 using MegaCrit.Sts2.Core.Models.Characters;
 using MegaCrit.Sts2.Core.MonsterMoves;
 using MegaCrit.Sts2.Core.MonsterMoves.Intents;
@@ -635,6 +637,11 @@ public static class BridgeHandler
             else if (screen == "CARD_SELECTION")
             {
                 actions.AddRange(GetCardSelectionActionDescriptors());
+            }
+            else if (screen.StartsWith("MENU_"))
+            {
+                // Unknown overlay/capstone screen — add dismiss/back actions
+                actions.Add(new { action = "dismiss", description = "Dismiss this screen (back/close)" });
             }
 
             actions.Add(new { action = "console", description = "Execute any console command" });
@@ -1309,6 +1316,7 @@ public static class BridgeHandler
                 "card_skip" => DismissCardSelectionScreen(),
                 "discard_potion" => DiscardPotion(p),
                 "proceed" => ProceedCurrentScreen("proceed", "proceed", "continue", "leave"),
+                "dismiss" or "back" or "close" => DismissCurrentScreen(),
                 _ => new { error = $"Unsupported action '{action}'" },
             };
         }
@@ -1523,6 +1531,75 @@ public static class BridgeHandler
         return null;
     }
 
+    /// <summary>
+    /// Search a node's descendant tree for a button with one of the given names, then ForceClick it.
+    /// Returns the name of the clicked button, or null if not found.
+    /// Uses NClickableControl.ForceClick() which is purely signal-based (no mouse simulation).
+    /// </summary>
+    private static string? TryForceClickChildButton(Godot.Node root, string[] buttonNames, int maxDepth = 5)
+    {
+        // First try direct child/descendant lookup by name
+        foreach (var name in buttonNames)
+        {
+            try
+            {
+                // Try unique name (%) lookup first
+                var node = root.GetNodeOrNull($"%{name}");
+                if (node == null)
+                {
+                    // Try recursive find
+                    node = FindDescendant(root, name, maxDepth);
+                }
+                if (node == null) continue;
+
+                // Check if visible
+                if (node is Godot.Control ctrl && !ctrl.Visible) continue;
+
+                // Try ForceClick (NClickableControl method)
+                var forceClick = node.GetType().GetMethod("ForceClick",
+                    BindingFlags.Instance | BindingFlags.Public);
+                if (forceClick != null)
+                {
+                    forceClick.Invoke(node, null);
+                    return name;
+                }
+
+                // Fallback: try EmitSignal("Released")
+                try
+                {
+                    node.EmitSignal("Released", node);
+                    return $"{name}:EmitSignal";
+                }
+                catch { }
+
+                // Fallback for BaseButton: emit "pressed"
+                if (node is Godot.BaseButton)
+                {
+                    node.EmitSignal("pressed");
+                    return $"{name}:pressed";
+                }
+            }
+            catch (Exception ex)
+            {
+                ModEntry.WriteLog($"TryForceClickChildButton({name}) error: {ex.GetBaseException().Message}");
+            }
+        }
+        return null;
+    }
+
+    private static Godot.Node? FindDescendant(Godot.Node parent, string name, int depth)
+    {
+        if (depth <= 0) return null;
+        foreach (var child in parent.GetChildren())
+        {
+            if (string.Equals(child.Name.ToString(), name, StringComparison.OrdinalIgnoreCase))
+                return child;
+            var found = FindDescendant(child, name, depth - 1);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
     private static void CollectButtons(Godot.Node parent, List<Godot.BaseButton> buttons, int depth)
     {
         if (depth <= 0) return;
@@ -1606,6 +1683,63 @@ public static class BridgeHandler
             }
         }
 
+        // Fallback: find and ForceClick the rest site choice button by index
+        if (screenObj is Godot.Node screenNode)
+        {
+            // Map choice name to button index in ChoicesContainer
+            int buttonIndex = normalized switch
+            {
+                "rest" or "heal" => 0,
+                "smith" or "upgrade" => 1,
+                "recall" => 2,
+                "dig" => -1,     // dig/lift are special
+                "lift" => -1,
+                _ => -1,
+            };
+
+            try
+            {
+                var choicesContainer = screenNode.GetNodeOrNull("%ChoicesContainer")
+                    ?? FindDescendant(screenNode, "ChoicesContainer", 4);
+                if (choicesContainer != null)
+                {
+                    // Try by index first
+                    if (buttonIndex >= 0 && buttonIndex < choicesContainer.GetChildCount())
+                    {
+                        var button = choicesContainer.GetChild(buttonIndex);
+                        var fc = button.GetType().GetMethod("ForceClick", BindingFlags.Instance | BindingFlags.Public);
+                        if (fc != null)
+                        {
+                            fc.Invoke(button, null);
+                            ModEntry.WriteLog($"[RestSite] choice={choice} via ForceClick(ChoicesContainer[{buttonIndex}])");
+                            return new { success = true, choice = normalized, invoked = $"ForceClick:ChoicesContainer[{buttonIndex}]" };
+                        }
+                    }
+
+                    // Try by name match on children
+                    for (int i = 0; i < choicesContainer.GetChildCount(); i++)
+                    {
+                        var child = choicesContainer.GetChild(i);
+                        var childName = child.Name.ToString().ToLowerInvariant();
+                        if (childName.Contains(normalized) || childName.Contains(normalized.Replace("smith", "upgrade")))
+                        {
+                            var fc = child.GetType().GetMethod("ForceClick", BindingFlags.Instance | BindingFlags.Public);
+                            if (fc != null)
+                            {
+                                fc.Invoke(child, null);
+                                ModEntry.WriteLog($"[RestSite] choice={choice} via ForceClick({child.Name})");
+                                return new { success = true, choice = normalized, invoked = $"ForceClick:{child.Name}" };
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                ModEntry.WriteLog($"[RestSite] ForceClick fallback error: {ex.GetBaseException().Message}");
+            }
+        }
+
         var cmd = normalized switch
         {
             "rest" or "heal" => "heal 30",
@@ -1633,20 +1767,53 @@ public static class BridgeHandler
         if (normalized is "proceed" or "leave" or "shop_proceed")
             return ProceedCurrentScreen("shop_proceed", "leave", "proceed");
 
-        string cmd = normalized switch
+        var screenObj = GetActiveScreenObject();
+        if (screenObj == null)
+            return new { error = "No active shop screen object" };
+
+        // Get all slots via GetAllSlots()
+        var allSlots = new List<object>();
+        try
         {
-            "shop_buy" or "buy_card" => $"shop buy_card {index}",
-            "buy_relic" => $"shop buy_relic {index}",
-            "buy_potion" => $"shop buy_potion {index}",
-            "remove_card" or "purge" => "shop remove",
-            _ => normalized,
-        };
+            var method = screenObj.GetType().GetMethod("GetAllSlots", BindingFlags.Instance | BindingFlags.Public);
+            if (method != null)
+            {
+                var result = method.Invoke(screenObj, null);
+                if (result is IEnumerable enumerable)
+                    foreach (var slot in enumerable) { if (slot != null) allSlots.Add(slot); }
+            }
+        }
+        catch (Exception ex)
+        {
+            return new { error = $"Failed to get shop slots: {ex.GetBaseException().Message}" };
+        }
 
-        if (!TryExecuteConsoleCommand(cmd))
-            return new { error = "DevConsole not available for shop action", action = normalized, index };
+        if (index < 0 || index >= allSlots.Count)
+            return new { error = $"Index {index} out of range", action = normalized, slot_count = allSlots.Count };
 
-        ModEntry.WriteLog($"[ShopAction] {normalized} index={index}");
-        return new { success = true, action = normalized, index, invoked = $"console:{cmd}" };
+        var targetSlot = allSlots[index];
+
+        // Get the Hitbox (NClickableControl) and ForceClick it
+        var hitbox = GetMemberValue(targetSlot, "Hitbox");
+        if (hitbox != null)
+        {
+            var forceClick = hitbox.GetType().GetMethod("ForceClick", BindingFlags.Instance | BindingFlags.Public);
+            if (forceClick != null)
+            {
+                forceClick.Invoke(hitbox, null);
+                ModEntry.WriteLog($"[ShopAction] {normalized} index={index} via ForceClick(Hitbox)");
+                return new { success = true, action = normalized, index, label = GetShopSlotLabel(targetSlot, GetMemberValue(targetSlot, "Entry")), invoked = "ForceClick(Hitbox)" };
+            }
+        }
+
+        // Fallback: try ForceClick directly on the slot if it has it
+        if (TryInvokeMethod(targetSlot, ["ForceClick"], [], out var invokedMethod))
+        {
+            ModEntry.WriteLog($"[ShopAction] {normalized} index={index} via {invokedMethod}");
+            return new { success = true, action = normalized, index, invoked = invokedMethod };
+        }
+
+        return new { error = $"Could not buy item at index {index}", action = normalized, slot_type = targetSlot.GetType().Name };
     }
 
     private static object ExecuteRewardSelection(JsonElement p)
@@ -1655,13 +1822,45 @@ public static class BridgeHandler
             ? idx.GetInt32()
             : p.TryGetProperty("reward_index", out var rIdx) ? rIdx.GetInt32() : 0;
 
+        var screenObj = GetActiveScreenObject();
+        if (screenObj == null)
+            return new { error = "No active screen object for REWARD", action = "reward_select" };
+
+        // Try to get reward buttons directly from the known field
+        var buttons = GetItemsFromMembers(screenObj, "_rewardButtons");
+        if (buttons.Count > 0)
+        {
+            if (index < 0 || index >= buttons.Count)
+                return new { error = $"Index {index} out of range", action = "reward_select", item_count = buttons.Count };
+
+            var button = buttons[index];
+
+            // Try calling RewardCollectedFrom(button) on the screen
+            if (TryInvokeMethod(screenObj, ["RewardCollectedFrom"], [button], out var invokedMethod))
+            {
+                ModEntry.WriteLog($"[reward_select] index={index} via {invokedMethod}");
+                return new { success = true, action = "reward_select", index, label = GetRewardLabel(button), invoked = invokedMethod };
+            }
+
+            // Fallback: try clicking the button directly (NRewardButton extends NButton)
+            if (TryInvokeMethod(button, ["EmitSignal"], [new StringName("RewardClaimed"), button], out invokedMethod)
+                || TryInvokeMethod(button, ["OnClick", "Click", "Press", "EmitPressed"], [], out invokedMethod))
+            {
+                ModEntry.WriteLog($"[reward_select] index={index} via button.{invokedMethod}");
+                return new { success = true, action = "reward_select", index, label = GetRewardLabel(button), invoked = $"button.{invokedMethod}" };
+            }
+
+            return new { error = $"Found button at index {index} but could not invoke selection", action = "reward_select", button_type = button.GetType().Name };
+        }
+
+        // Fallback to generic indexed interaction
         return ExecuteIndexedScreenInteraction(
             expectedScreen: "REWARD",
             actionName: "reward_select",
             index: index,
             collectionMembers: ["Rewards", "RewardItems", "AvailableRewards", "Entries", "Choices", "Options"],
             collectionMethods: ["GetRewards", "GetCurrentRewards", "GetChoices"],
-            screenMethods: ["SelectReward", "ChooseReward", "TakeReward", "ClaimReward", "Select", "Choose", "OnRewardClicked"],
+            screenMethods: ["SelectReward", "ChooseReward", "TakeReward", "ClaimReward", "Select", "Choose", "OnRewardClicked", "RewardCollectedFrom"],
             itemMethods: ["Select", "Choose", "Take", "Claim", "Click", "Invoke"]);
     }
 
@@ -1706,11 +1905,48 @@ public static class BridgeHandler
         if (screenObj == null)
             return new { error = "No active card selection screen object" };
 
-        var cards = GetItemsFromMembers(screenObj, "Cards", "CardChoices", "Choices", "SelectableCards", "Options");
+        var cards = GetItemsFromMembers(screenObj, "_cards", "Cards", "CardChoices", "Choices", "SelectableCards", "Options", "_cardChoices");
         if (cards.Count == 0)
             cards = GetItemsFromMethods(screenObj, "GetCards", "GetChoices");
 
         var results = new List<object>();
+
+        // Check for bundle selection screen (NChooseABundleSelectionScreen)
+        if (cards.Count == 0 && screenObj is Godot.Node sn)
+        {
+            var bundleRow = sn.GetNodeOrNull("%BundleRow");
+            if (bundleRow != null && bundleRow.GetChildCount() > 0)
+            {
+                foreach (var index in indices.Distinct())
+                {
+                    if (index < 0 || index >= bundleRow.GetChildCount())
+                    {
+                        results.Add(new { index, label = $"bundle_{index}", success = false, invoked = (string?)null });
+                        continue;
+                    }
+                    var bundle = bundleRow.GetChild(index);
+                    var hitbox = GetMemberValue(bundle, "Hitbox");
+                    bool clicked = false;
+                    string? inv = null;
+                    if (hitbox != null)
+                    {
+                        var fc = hitbox.GetType().GetMethod("ForceClick", BindingFlags.Instance | BindingFlags.Public);
+                        if (fc != null) { fc.Invoke(hitbox, null); clicked = true; inv = "ForceClick(Hitbox)"; }
+                    }
+                    if (!clicked && TryInvokeMethod(screenObj, ["OnBundleClicked"], [bundle], out inv))
+                        clicked = true;
+
+                    results.Add(new { index, label = $"Bundle {index + 1}", success = clicked, invoked = inv });
+                }
+
+                object? bundleConfirm = null;
+                if (confirmAfterSelection)
+                    bundleConfirm = ConfirmCurrentScreen("card_confirm", "confirm", "proceed");
+
+                return new { success = results.All(r => (bool)(r.GetType().GetProperty("success")?.GetValue(r) ?? false)), selected_count = results.Count, results, confirm = bundleConfirm };
+            }
+        }
+
         foreach (var index in indices.Distinct())
         {
             string? invokedMethod = null;
@@ -1757,6 +1993,17 @@ public static class BridgeHandler
             return new { success = true, action = requestedAction, screen, invoked = invokedMethod };
         }
 
+        // Fallback: find and ForceClick a Proceed/Continue/Done button in the scene tree
+        if (screenObj is Godot.Node screenNode)
+        {
+            var clicked = TryForceClickChildButton(screenNode, ["ProceedButton", "Proceed", "Continue", "Done", "Leave", "Confirm", "Accept"]);
+            if (clicked != null)
+            {
+                ModEntry.WriteLog($"[{requestedAction}] via ForceClick on {clicked}");
+                return new { success = true, action = requestedAction, screen, invoked = $"ForceClick:{clicked}" };
+            }
+        }
+
         foreach (var cmd in consoleFallbacks.Where(c => !string.IsNullOrWhiteSpace(c)))
         {
             if (TryExecuteConsoleCommand(cmd))
@@ -1780,7 +2027,49 @@ public static class BridgeHandler
             return new { success = true, action = requestedAction, screen, invoked = invokedMethod };
         }
 
+        // Fallback: find and ForceClick a Confirm/Proceed button in the screen's scene tree
+        if (screenObj is Godot.Node screenNode)
+        {
+            var clicked = TryForceClickChildButton(screenNode, ["Confirm", "Proceed", "Done", "Accept", "OK"]);
+            if (clicked != null)
+            {
+                ModEntry.WriteLog($"[{requestedAction}] via ForceClick on {clicked}");
+                return new { success = true, action = requestedAction, screen, invoked = $"ForceClick:{clicked}" };
+            }
+        }
+
         return ProceedCurrentScreen(requestedAction, consoleFallbacks);
+    }
+
+    /// <summary>
+    /// Dismiss any overlay/capstone/popup screen by finding and clicking Back/Close/Dismiss buttons.
+    /// Works for DeckViewScreen, InspectCardScreen, and other MENU_ screens.
+    /// </summary>
+    private static object DismissCurrentScreen()
+    {
+        var screen = ScreenDetector.GetCurrentScreen();
+        var screenObj = GetActiveScreenObject();
+
+        // Try Close/Back/Dismiss methods on the screen object
+        if (screenObj != null && TryInvokeMethod(screenObj, ["Close", "Back", "Dismiss", "Hide", "Pop"], Array.Empty<object?>(), out var invokedMethod))
+        {
+            ModEntry.WriteLog($"[dismiss] via {invokedMethod}");
+            return new { success = true, action = "dismiss", screen, invoked = invokedMethod };
+        }
+
+        // Try ForceClick on BackButton/CloseButton/DismissButton
+        if (screenObj is Godot.Node screenNode)
+        {
+            var clicked = TryForceClickChildButton(screenNode, ["BackButton", "Back", "CloseButton", "Close", "DismissButton", "Dismiss"]);
+            if (clicked != null)
+            {
+                ModEntry.WriteLog($"[dismiss] via ForceClick on {clicked}");
+                return new { success = true, action = "dismiss", screen, invoked = $"ForceClick:{clicked}" };
+            }
+        }
+
+        // Try navigate_menu back as last resort
+        return ProceedCurrentScreen("dismiss", "back");
     }
 
     private static object SkipCurrentScreen(string requestedAction, params string[] consoleFallbacks)
@@ -1792,6 +2081,17 @@ public static class BridgeHandler
         {
             ModEntry.WriteLog($"[{requestedAction}] via {invokedMethod}");
             return new { success = true, action = requestedAction, screen, invoked = invokedMethod };
+        }
+
+        // Fallback: find and ForceClick a Skip/Back button in the screen's scene tree
+        if (screenObj is Godot.Node screenNode)
+        {
+            var clicked = TryForceClickChildButton(screenNode, ["Skip", "Back", "Cancel", "Close"]);
+            if (clicked != null)
+            {
+                ModEntry.WriteLog($"[{requestedAction}] via ForceClick on {clicked}");
+                return new { success = true, action = requestedAction, screen, invoked = $"ForceClick:{clicked}" };
+            }
         }
 
         foreach (var cmd in consoleFallbacks.Where(c => !string.IsNullOrWhiteSpace(c)))
@@ -1853,7 +2153,7 @@ public static class BridgeHandler
                             {
                                 action = "event_option",
                                 choice_index = i,
-                                label = GetReadableLabel(items[i]),
+                                label = GetEventOptionLabel(items[i]),
                                 option_type = items[i].GetType().Name,
                                 source = fieldName,
                             });
@@ -1894,23 +2194,142 @@ public static class BridgeHandler
     {
         var actions = new List<object>();
         var screenObj = GetActiveScreenObject();
-        var rewards = GetItemsFromMembers(screenObj, "Rewards", "RewardItems", "AvailableRewards", "Entries", "Choices", "Options");
+
+        // NRewardsScreen stores buttons in _rewardButtons (private List<Control>)
+        var rewards = GetItemsFromMembers(screenObj, "_rewardButtons", "Rewards", "RewardItems", "AvailableRewards", "Entries", "Choices", "Options");
         if (rewards.Count == 0)
             rewards = GetItemsFromMethods(screenObj, "GetRewards", "GetCurrentRewards", "GetChoices");
 
+        // Also filter out skipped rewards
+        var skipped = GetItemsFromMembers(screenObj, "_skippedRewardButtons");
+        var skippedSet = new HashSet<object>(skipped);
+
         for (int i = 0; i < rewards.Count; i++)
         {
+            var reward = rewards[i];
+            var isSkipped = skippedSet.Contains(reward);
             actions.Add(new
             {
                 action = "reward_select",
                 reward_index = i,
-                label = GetReadableLabel(rewards[i]),
-                reward_type = rewards[i].GetType().Name,
+                label = GetRewardLabel(reward),
+                reward_type = reward.GetType().Name,
+                skipped = isSkipped,
             });
         }
 
         actions.Add(new { action = "reward_proceed" });
         return actions;
+    }
+
+    private static string GetEventOptionLabel(object? optionOrButton)
+    {
+        if (optionOrButton == null) return "unknown";
+
+        // Could be an NEventOptionButton (has .Option property) or an EventOption directly
+        var option = GetMemberValue(optionOrButton, "Option") ?? optionOrButton;
+
+        var titleStr = GetLocStringText(GetMemberValue(option, "Title"));
+        var descStr = GetLocStringText(GetMemberValue(option, "Description"));
+
+        if (!string.IsNullOrWhiteSpace(titleStr) && !string.IsNullOrWhiteSpace(descStr))
+            return $"{StripBBCode(titleStr)}: {StripBBCode(descStr)}";
+        if (!string.IsNullOrWhiteSpace(titleStr))
+            return StripBBCode(titleStr);
+        if (!string.IsNullOrWhiteSpace(descStr))
+            return StripBBCode(descStr);
+
+        // Fallback: try reading the label text directly from the Godot node
+        if (optionOrButton is Godot.Node node)
+        {
+            try
+            {
+                var textNode = node.GetNodeOrNull("%Text") ?? node.GetNodeOrNull("Text");
+                if (textNode != null)
+                {
+                    var text = GetMemberValue(textNode, "Text")?.ToString();
+                    if (!string.IsNullOrWhiteSpace(text))
+                        return StripBBCode(text);
+                }
+            }
+            catch { }
+        }
+
+        return GetReadableLabel(optionOrButton);
+    }
+
+    /// <summary>
+    /// Extract text from a LocString object (tries GetFormattedText(), then ToString()).
+    /// </summary>
+    private static string? GetLocStringText(object? locString)
+    {
+        if (locString == null) return null;
+        if (locString is string s) return s;
+
+        // Try GetFormattedText() first (returns BBCode-formatted text)
+        try
+        {
+            var method = locString.GetType().GetMethod("GetFormattedText",
+                BindingFlags.Instance | BindingFlags.Public);
+            if (method != null)
+            {
+                var result = method.Invoke(locString, null)?.ToString();
+                if (!string.IsNullOrWhiteSpace(result))
+                    return result;
+            }
+        }
+        catch { }
+
+        // Fallback to ToString()
+        var str = locString.ToString();
+        if (!string.IsNullOrWhiteSpace(str) && str != locString.GetType().Name)
+            return str;
+
+        return null;
+    }
+
+    private static string StripBBCode(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+        // Remove BBCode-style tags like [b], [/b], [color], etc.
+        return System.Text.RegularExpressions.Regex.Replace(text, @"\[/?[^\]]+\]", "").Trim();
+    }
+
+    private static string GetRewardLabel(object? button)
+    {
+        if (button == null) return "unknown";
+
+        // NRewardButton has a Reward property with Description (LocString)
+        var reward = GetMemberValue(button, "Reward");
+        if (reward != null)
+        {
+            var desc = GetLocStringText(GetMemberValue(reward, "Description"));
+            if (!string.IsNullOrWhiteSpace(desc))
+                return StripBBCode(desc);
+        }
+
+        // Fallback: try reading label text from the Godot node's LabelContainer
+        if (button is Godot.Node node)
+        {
+            try
+            {
+                // NRewardButton has LabelContainer/Text child
+                var labelNode = node.GetNodeOrNull("LabelContainer");
+                if (labelNode != null)
+                {
+                    foreach (var child in labelNode.GetChildren())
+                    {
+                        var text = GetMemberValue(child, "Text")?.ToString();
+                        if (!string.IsNullOrWhiteSpace(text))
+                            return StripBBCode(text);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        // Fall back to generic label extraction
+        return GetReadableLabel(button);
     }
 
     private static List<object> GetShopActionDescriptors()
@@ -1919,13 +2338,141 @@ public static class BridgeHandler
         var screenObj = GetActiveScreenObject();
         if (screenObj != null)
         {
-            AddShopItemActions(actions, screenObj, "card", "Cards", "CardOffers", "AvailableCards");
-            AddShopItemActions(actions, screenObj, "relic", "Relics", "RelicOffers", "AvailableRelics");
-            AddShopItemActions(actions, screenObj, "potion", "Potions", "PotionOffers", "AvailablePotions");
+            // If we're on NMerchantRoom (not the inventory), auto-open the inventory
+            var typeName = screenObj.GetType().Name;
+            if (typeName.Contains("MerchantRoom") && !typeName.Contains("Inventory"))
+            {
+                try
+                {
+                    var openMethod = screenObj.GetType().GetMethod("OpenInventory", BindingFlags.Instance | BindingFlags.Public);
+                    if (openMethod != null)
+                    {
+                        openMethod.Invoke(screenObj, null);
+                        ModEntry.WriteLog("[Shop] Auto-opened inventory from MerchantRoom");
+                        // Re-get the active screen object which should now be NMerchantInventory
+                        screenObj = GetActiveScreenObject();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ModEntry.WriteLog($"[Shop] Auto-open inventory failed: {ex.GetBaseException().Message}");
+                }
+            }
+
+            // NMerchantInventory: get all slots via GetAllSlots() which returns NMerchantSlot nodes
+            var allSlots = new List<object>();
+            try
+            {
+                var method = screenObj.GetType().GetMethod("GetAllSlots", BindingFlags.Instance | BindingFlags.Public);
+                if (method != null)
+                {
+                    var result = method.Invoke(screenObj, null);
+                    if (result is IEnumerable enumerable)
+                        foreach (var slot in enumerable) { if (slot != null) allSlots.Add(slot); }
+                }
+            }
+            catch (Exception ex)
+            {
+                ModEntry.WriteLog($"GetShopActionDescriptors GetAllSlots error: {ex.GetBaseException().Message}");
+            }
+
+            for (int i = 0; i < allSlots.Count; i++)
+            {
+                var slot = allSlots[i];
+                var entry = GetMemberValue(slot, "Entry");
+                var cost = entry != null ? GetNumericMember(entry, "Cost") : null;
+                var isStocked = entry != null ? GetMemberValue(entry, "IsStocked") : null;
+                var slotType = slot.GetType().Name;
+
+                // Determine item type from slot class name
+                string itemType = slotType switch
+                {
+                    var s when s.Contains("Card") && s.Contains("Removal") => "remove",
+                    var s when s.Contains("Card") => "card",
+                    var s when s.Contains("Relic") => "relic",
+                    var s when s.Contains("Potion") => "potion",
+                    _ => "unknown"
+                };
+
+                // Get label from the entry or slot
+                string label = GetShopSlotLabel(slot, entry);
+
+                actions.Add(new
+                {
+                    action = "shop_buy",
+                    item_type = itemType,
+                    index = i,
+                    label,
+                    cost,
+                    in_stock = isStocked is bool b ? b : true,
+                    slot_type = slotType,
+                });
+            }
+
+            // Fallback: try legacy approach if no slots found
+            if (allSlots.Count == 0)
+            {
+                // Try Inventory property path
+                var inventory = GetMemberValue(screenObj, "Inventory");
+                if (inventory != null)
+                {
+                    AddShopEntryActions(actions, inventory, "card", "CharacterCardEntries", "ColorlessCardEntries", "CardEntries");
+                    AddShopEntryActions(actions, inventory, "relic", "RelicEntries");
+                    AddShopEntryActions(actions, inventory, "potion", "PotionEntries");
+                }
+                else
+                {
+                    AddShopItemActions(actions, screenObj, "card", "Cards", "CardOffers", "AvailableCards");
+                    AddShopItemActions(actions, screenObj, "relic", "Relics", "RelicOffers", "AvailableRelics");
+                    AddShopItemActions(actions, screenObj, "potion", "Potions", "PotionOffers", "AvailablePotions");
+                }
+            }
         }
 
         actions.Add(new { action = "shop_proceed" });
         return actions;
+    }
+
+    private static string GetShopSlotLabel(object slot, object? entry)
+    {
+        if (entry != null)
+        {
+            // MerchantCardEntry has Card, MerchantRelicEntry has Relic, etc.
+            foreach (var memberName in new[] { "Card", "Relic", "Potion", "Name", "DisplayName", "Title" })
+            {
+                var value = GetMemberValue(entry, memberName);
+                if (value != null)
+                {
+                    var name = GetMemberValue(value, "Name") ?? GetMemberValue(value, "DisplayName");
+                    if (name is string s && !string.IsNullOrWhiteSpace(s))
+                        return s;
+                    var nameStr = name?.ToString();
+                    if (!string.IsNullOrWhiteSpace(nameStr) && nameStr != name?.GetType().Name)
+                        return nameStr;
+                    return value.GetType().Name;
+                }
+            }
+        }
+        return GetReadableLabel(slot);
+    }
+
+    private static void AddShopEntryActions(List<object> actions, object inventory, string itemType, params string[] memberNames)
+    {
+        var entries = GetItemsFromMembers(inventory, memberNames);
+        for (int i = 0; i < entries.Count; i++)
+        {
+            var cost = GetNumericMember(entries[i], "Cost");
+            var isStocked = GetMemberValue(entries[i], "IsStocked");
+            actions.Add(new
+            {
+                action = "shop_buy",
+                item_type = itemType,
+                index = i,
+                label = GetReadableLabel(entries[i]),
+                cost,
+                in_stock = isStocked is bool b ? b : true,
+            });
+        }
     }
 
     private static List<object> GetRestActionDescriptors()
@@ -1965,7 +2512,7 @@ public static class BridgeHandler
     {
         var actions = new List<object>();
         var screenObj = GetActiveScreenObject();
-        var cards = GetItemsFromMembers(screenObj, "Cards", "CardChoices", "Choices", "SelectableCards", "Options");
+        var cards = GetItemsFromMembers(screenObj, "_cards", "Cards", "CardChoices", "Choices", "SelectableCards", "Options");
         if (cards.Count == 0)
             cards = GetItemsFromMethods(screenObj, "GetCards", "GetChoices");
 
@@ -1978,6 +2525,50 @@ public static class BridgeHandler
                 label = GetReadableLabel(cards[i]),
                 card_type = cards[i].GetType().Name,
             });
+        }
+
+        // Fallback: for bundle selection screens (NChooseABundleSelectionScreen)
+        // Find NCardBundle children in _bundleRow
+        if (cards.Count == 0 && screenObj is Godot.Node screenNode)
+        {
+            try
+            {
+                var bundleRow = screenNode.GetNodeOrNull("%BundleRow");
+                if (bundleRow != null)
+                {
+                    for (int i = 0; i < bundleRow.GetChildCount(); i++)
+                    {
+                        var bundle = bundleRow.GetChild(i);
+                        actions.Add(new
+                        {
+                            action = "card_select",
+                            card_index = i,
+                            label = $"Bundle {i + 1}",
+                            card_type = bundle.GetType().Name,
+                        });
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                ModEntry.WriteLog($"GetCardSelectionActionDescriptors bundle fallback error: {ex.GetBaseException().Message}");
+            }
+        }
+
+        // Fallback: for NChooseACardSelectionScreen and similar, look for _cardChoices
+        if (actions.Count == 0)
+        {
+            var cardChoices = GetItemsFromMembers(screenObj, "_cardChoices", "_cardHolders");
+            for (int i = 0; i < cardChoices.Count; i++)
+            {
+                actions.Add(new
+                {
+                    action = "card_select",
+                    card_index = i,
+                    label = GetReadableLabel(cardChoices[i]),
+                    card_type = cardChoices[i].GetType().Name,
+                });
+            }
         }
 
         actions.Add(new { action = "card_confirm" });
@@ -3615,7 +4206,34 @@ public static class BridgeHandler
                         return new { error = "Not on main menu" };
 
                     // Check if there's actually a save to continue
-                    if (!RunManager.Instance.IsInProgress)
+                    // Use SaveManager.HasRunSave (not RunManager.IsInProgress — that's only true after loading)
+                    bool hasSave = false;
+                    try
+                    {
+                        var saveManager = typeof(MegaCrit.Sts2.Core.Saves.SaveManager)
+                            .GetProperty("Instance", BindingFlags.Static | BindingFlags.Public)?.GetValue(null);
+                        if (saveManager != null)
+                        {
+                            var hasRunSaveProp = saveManager.GetType().GetProperty("HasRunSave", BindingFlags.Instance | BindingFlags.Public);
+                            if (hasRunSaveProp != null)
+                                hasSave = (bool)(hasRunSaveProp.GetValue(saveManager) ?? false);
+                        }
+                    }
+                    catch { }
+
+                    // Fallback: also check if the Continue button is visible
+                    if (!hasSave)
+                    {
+                        try
+                        {
+                            var continueBtn = GetMemberValue(mainMenu, "_continueButton");
+                            if (continueBtn is Godot.Control ctrl && ctrl.Visible)
+                                hasSave = true;
+                        }
+                        catch { }
+                    }
+
+                    if (!hasSave)
                         return new { error = "No saved run to continue" };
 
                     // Call the private OnContinueButtonPressed method

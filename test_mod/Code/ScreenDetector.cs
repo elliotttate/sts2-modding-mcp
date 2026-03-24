@@ -147,9 +147,13 @@ public static class ScreenDetector
         return screenTypeName switch
         {
             var s when s.Contains("CardSelection", StringComparison.OrdinalIgnoreCase)
+                || s.Contains("SelectScreen", StringComparison.OrdinalIgnoreCase)
                 || s.Contains("ChooseCard", StringComparison.OrdinalIgnoreCase)
+                || s.Contains("ChooseACard", StringComparison.OrdinalIgnoreCase)
+                || s.Contains("ChooseABundle", StringComparison.OrdinalIgnoreCase)
                 || s.Contains("Draft", StringComparison.OrdinalIgnoreCase)
                 || s.Contains("Grid", StringComparison.OrdinalIgnoreCase)
+                || s.Contains("CardReward", StringComparison.OrdinalIgnoreCase)
                 => "CARD_SELECTION",
             var s when s.Contains("Reward", StringComparison.OrdinalIgnoreCase)
                 || s.Contains("Loot", StringComparison.OrdinalIgnoreCase)

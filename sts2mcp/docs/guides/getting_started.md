@@ -2,7 +2,7 @@
 
 ## Prerequisites
 - .NET SDK 9.0+
-- Godot 4.5.1 / MegaDot 4.5.1 (for PCK export only)
+- Godot 4.5.1 (for PCK export only — standard Godot or MegaDot, version must be 4.5.1)
 - The game: Slay the Spire 2
 - C# IDE: Rider (recommended) or Visual Studio
 
