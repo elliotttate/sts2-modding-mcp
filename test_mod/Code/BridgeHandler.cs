@@ -14,7 +14,10 @@ using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.Relics;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Saves;
+using MegaCrit.Sts2.Core.Entities.Merchant;
+using MegaCrit.Sts2.Core.Nodes.Rooms;
 using MegaCrit.Sts2.Core.Models.Characters;
 using MegaCrit.Sts2.Core.MonsterMoves;
 using MegaCrit.Sts2.Core.MonsterMoves.Intents;
@@ -1767,53 +1770,47 @@ public static class BridgeHandler
         if (normalized is "proceed" or "leave" or "shop_proceed")
             return ProceedCurrentScreen("shop_proceed", "leave", "proceed");
 
-        var screenObj = GetActiveScreenObject();
-        if (screenObj == null)
-            return new { error = "No active shop screen object" };
+        var runState = RunManager.Instance.IsInProgress ? RunManager.Instance.DebugOnlyGetState() : null;
+        if (runState?.CurrentRoom is not MegaCrit.Sts2.Core.Rooms.MerchantRoom merchantRoom)
+            return new { error = "Not in a merchant room" };
 
-        // Get all slots via GetAllSlots()
-        var allSlots = new List<object>();
+        // Auto-open inventory if needed
+        var merchUI = GetMemberValue(null, "Instance") as object;
         try
         {
-            var method = screenObj.GetType().GetMethod("GetAllSlots", BindingFlags.Instance | BindingFlags.Public);
-            if (method != null)
+            var nMerchantRoomType = typeof(MegaCrit.Sts2.Core.Nodes.Rooms.NMerchantRoom);
+            var instanceProp = nMerchantRoomType.GetProperty("Instance", BindingFlags.Static | BindingFlags.Public);
+            var merchRoomInstance = instanceProp?.GetValue(null);
+            if (merchRoomInstance != null)
             {
-                var result = method.Invoke(screenObj, null);
-                if (result is IEnumerable enumerable)
-                    foreach (var slot in enumerable) { if (slot != null) allSlots.Add(slot); }
+                var inventoryObj = GetMemberValue(merchRoomInstance, "Inventory");
+                var isOpen = GetMemberValue(inventoryObj, "IsOpen");
+                if (isOpen is bool open && !open)
+                {
+                    TryInvokeMethod(merchRoomInstance, ["OpenInventory"], [], out _);
+                }
             }
         }
-        catch (Exception ex)
-        {
-            return new { error = $"Failed to get shop slots: {ex.GetBaseException().Message}" };
-        }
+        catch { }
 
-        if (index < 0 || index >= allSlots.Count)
-            return new { error = $"Index {index} out of range", action = normalized, slot_count = allSlots.Count };
+        // Use the game's inventory API directly (like STS2MCP does)
+        var inventory = merchantRoom.Inventory;
+        var allEntries = inventory.AllEntries.ToList();
 
-        var targetSlot = allSlots[index];
+        if (index < 0 || index >= allEntries.Count)
+            return new { error = $"Index {index} out of range", action = normalized, item_count = allEntries.Count };
 
-        // Get the Hitbox (NClickableControl) and ForceClick it
-        var hitbox = GetMemberValue(targetSlot, "Hitbox");
-        if (hitbox != null)
-        {
-            var forceClick = hitbox.GetType().GetMethod("ForceClick", BindingFlags.Instance | BindingFlags.Public);
-            if (forceClick != null)
-            {
-                forceClick.Invoke(hitbox, null);
-                ModEntry.WriteLog($"[ShopAction] {normalized} index={index} via ForceClick(Hitbox)");
-                return new { success = true, action = normalized, index, label = GetShopSlotLabel(targetSlot, GetMemberValue(targetSlot, "Entry")), invoked = "ForceClick(Hitbox)" };
-            }
-        }
+        var entry = allEntries[index];
+        if (!entry.IsStocked)
+            return new { error = "Item is sold out", action = normalized, index };
+        if (!entry.EnoughGold)
+            return new { error = $"Not enough gold (need {entry.Cost})", action = normalized, index, cost = entry.Cost };
 
-        // Fallback: try ForceClick directly on the slot if it has it
-        if (TryInvokeMethod(targetSlot, ["ForceClick"], [], out var invokedMethod))
-        {
-            ModEntry.WriteLog($"[ShopAction] {normalized} index={index} via {invokedMethod}");
-            return new { success = true, action = normalized, index, invoked = invokedMethod };
-        }
+        // Fire-and-forget purchase using game's own purchase API
+        _ = entry.OnTryPurchaseWrapper(inventory);
 
-        return new { error = $"Could not buy item at index {index}", action = normalized, slot_type = targetSlot.GetType().Name };
+        ModEntry.WriteLog($"[ShopAction] {normalized} index={index} purchased for {entry.Cost} gold");
+        return new { success = true, action = normalized, index, cost = entry.Cost, invoked = "OnTryPurchaseWrapper" };
     }
 
     private static object ExecuteRewardSelection(JsonElement p)
@@ -1830,24 +1827,31 @@ public static class BridgeHandler
         var buttons = GetItemsFromMembers(screenObj, "_rewardButtons");
         if (buttons.Count > 0)
         {
-            if (index < 0 || index >= buttons.Count)
-                return new { error = $"Index {index} out of range", action = "reward_select", item_count = buttons.Count };
+            // Filter to only enabled buttons (like STS2MCP does)
+            var enabledButtons = buttons.Where(b => {
+                var enabled = GetMemberValue(b, "IsEnabled");
+                return enabled is not false;
+            }).ToList();
 
-            var button = buttons[index];
+            if (index < 0 || index >= enabledButtons.Count)
+                return new { error = $"Index {index} out of range", action = "reward_select", item_count = enabledButtons.Count };
 
-            // Try calling RewardCollectedFrom(button) on the screen
-            if (TryInvokeMethod(screenObj, ["RewardCollectedFrom"], [button], out var invokedMethod))
+            var button = enabledButtons[index];
+            var label = GetRewardLabel(button);
+
+            // Primary: ForceClick the NRewardButton directly (NRewardButton extends NButton extends NClickableControl)
+            // This is the cleanest approach - same as STS2MCP
+            if (TryInvokeMethod(button, ["ForceClick"], [], out var invokedMethod))
             {
-                ModEntry.WriteLog($"[reward_select] index={index} via {invokedMethod}");
-                return new { success = true, action = "reward_select", index, label = GetRewardLabel(button), invoked = invokedMethod };
+                ModEntry.WriteLog($"[reward_select] index={index} '{label}' via {invokedMethod}");
+                return new { success = true, action = "reward_select", index, label, invoked = invokedMethod };
             }
 
-            // Fallback: try clicking the button directly (NRewardButton extends NButton)
-            if (TryInvokeMethod(button, ["EmitSignal"], [new StringName("RewardClaimed"), button], out invokedMethod)
-                || TryInvokeMethod(button, ["OnClick", "Click", "Press", "EmitPressed"], [], out invokedMethod))
+            // Fallback: try RewardCollectedFrom(button) on the screen
+            if (TryInvokeMethod(screenObj, ["RewardCollectedFrom"], [button], out invokedMethod))
             {
-                ModEntry.WriteLog($"[reward_select] index={index} via button.{invokedMethod}");
-                return new { success = true, action = "reward_select", index, label = GetRewardLabel(button), invoked = $"button.{invokedMethod}" };
+                ModEntry.WriteLog($"[reward_select] index={index} '{label}' via {invokedMethod}");
+                return new { success = true, action = "reward_select", index, label, invoked = invokedMethod };
             }
 
             return new { error = $"Found button at index {index} but could not invoke selection", action = "reward_select", button_type = button.GetType().Name };
