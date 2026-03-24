@@ -1,5 +1,12 @@
 using System;
 using System.Reflection;
+using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
+using MegaCrit.Sts2.Core.Nodes.Screens.CardSelection;
+using MegaCrit.Sts2.Core.Nodes.Screens;
+using MegaCrit.Sts2.Core.Nodes.Rewards;
+using MegaCrit.Sts2.Core.Nodes.Combat;
+using MegaCrit.Sts2.Core.Nodes.Relics;
+using MegaCrit.Sts2.Core.Nodes.Screens.TreasureRoomRelic;
 
 namespace MCPTest;
 
@@ -24,10 +31,38 @@ public static class ScreenDetector
     {
         try
         {
-            // Check if in combat
+            // 1. Check NOverlayStack for top overlay FIRST (prevents soft-locks)
+            try
+            {
+                var overlay = NOverlayStack.Instance?.Peek();
+                if (overlay != null)
+                {
+                    var overlayScreen = DetectOverlayScreen(overlay);
+                    if (overlayScreen != null)
+                        return overlayScreen;
+                }
+            }
+            catch { /* NOverlayStack may not exist */ }
+
+            // 2. Check if in combat
             var cm = MegaCrit.Sts2.Core.Combat.CombatManager.Instance;
             if (cm != null && cm.IsInProgress)
             {
+                // 3. Check for mid-combat hand card selection (exhaust/discard prompts)
+                try
+                {
+                    var playerHand = NPlayerHand.Instance;
+                    if (playerHand != null && playerHand.IsInCardSelection)
+                    {
+                        return new CurrentScreenInfo
+                        {
+                            Screen = "HAND_SELECT",
+                            Source = "player_hand",
+                        };
+                    }
+                }
+                catch { /* NPlayerHand may not exist */ }
+
                 return new CurrentScreenInfo
                 {
                     Screen = cm.IsPlayPhase ? "COMBAT_PLAYER_TURN" : "COMBAT_ENEMY_TURN",
@@ -35,6 +70,22 @@ public static class ScreenDetector
                 };
             }
 
+            // 4. Check NMapScreen.Instance.IsOpen (catches post-combat/post-event map)
+            try
+            {
+                var mapScreen = MegaCrit.Sts2.Core.Nodes.Screens.Map.NMapScreen.Instance;
+                if (mapScreen != null && mapScreen.IsOpen)
+                {
+                    return new CurrentScreenInfo
+                    {
+                        Screen = "MAP",
+                        Source = "map_screen",
+                    };
+                }
+            }
+            catch { /* NMapScreen may not exist */ }
+
+            // 5. Fall through to existing ActiveScreenContext and room type detection
             var runManager = MegaCrit.Sts2.Core.Runs.RunManager.Instance;
             var state = runManager.IsInProgress ? runManager.DebugOnlyGetState() : null;
             var roomTypeName = state?.CurrentRoom?.GetType().Name;
@@ -185,6 +236,60 @@ public static class ScreenDetector
                 => "MAIN_MENU",
             _ => $"MENU_{screenTypeName}",
         };
+    }
+
+    private static CurrentScreenInfo? DetectOverlayScreen(IOverlayScreen overlay)
+    {
+        try
+        {
+            if (overlay is NCardGridSelectionScreen)
+                return new CurrentScreenInfo { Screen = "CARD_SELECTION", Source = "overlay_stack", ActiveScreenType = "NCardGridSelectionScreen" };
+        }
+        catch { }
+
+        try
+        {
+            if (overlay is NChooseACardSelectionScreen)
+                return new CurrentScreenInfo { Screen = "CARD_SELECTION", Source = "overlay_stack", ActiveScreenType = "NChooseACardSelectionScreen" };
+        }
+        catch { }
+
+        try
+        {
+            if (overlay is NChooseABundleSelectionScreen)
+                return new CurrentScreenInfo { Screen = "CARD_SELECTION", Source = "overlay_stack", ActiveScreenType = "NChooseABundleSelectionScreen" };
+        }
+        catch { }
+
+        try
+        {
+            if (overlay is NChooseARelicSelection)
+                return new CurrentScreenInfo { Screen = "RELIC_SELECTION", Source = "overlay_stack", ActiveScreenType = "NChooseARelicSelection" };
+        }
+        catch { }
+
+        try
+        {
+            if (overlay is NCardRewardSelectionScreen)
+                return new CurrentScreenInfo { Screen = "CARD_REWARD", Source = "overlay_stack", ActiveScreenType = "NCardRewardSelectionScreen" };
+        }
+        catch { }
+
+        try
+        {
+            if (overlay is NRewardsScreen)
+                return new CurrentScreenInfo { Screen = "REWARD", Source = "overlay_stack", ActiveScreenType = "NRewardsScreen" };
+        }
+        catch { }
+
+        // Catch-all for any other overlay
+        try
+        {
+            return new CurrentScreenInfo { Screen = "OVERLAY", Source = "overlay_stack", ActiveScreenType = overlay.GetType().Name };
+        }
+        catch { }
+
+        return null;
     }
 
     private static CurrentScreenInfo? DetectActiveScreen()

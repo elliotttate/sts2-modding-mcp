@@ -29,7 +29,11 @@ using HarmonyLib;
 using MegaCrit.Sts2.Core.Nodes.Screens;
 using MegaCrit.Sts2.Core.Nodes.Screens.Map;
 using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
+using MegaCrit.Sts2.Core.Nodes.Screens.CardSelection;
 using MegaCrit.Sts2.Core.Nodes.Screens.MainMenu;
+using MegaCrit.Sts2.Core.Nodes.Combat;
+using MegaCrit.Sts2.Core.Nodes.Cards.Holders;
+using MegaCrit.Sts2.Core.Nodes.Rewards;
 using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
 using Godot;
 using GodotEngine = Godot.Engine;
@@ -247,8 +251,9 @@ public static class BridgeHandler
             if (combatState == null)
                 return new { in_combat = false };
 
-            // Enemies with intent decomposition
+            // Enemies with intent decomposition and unique entity IDs
             var enemies = new List<object>();
+            var entityCounts = new Dictionary<string, int>();
             int enemyIdx = 0;
             foreach (var creature in combatState.Enemies)
             {
@@ -293,10 +298,17 @@ public static class BridgeHandler
                 }
                 catch (Exception ex) { ModEntry.WriteLog($"Intent read error: {ex.Message}"); }
 
+                // Generate unique entity ID
+                string baseId = creature.Monster?.GetType().Name ?? "unknown";
+                if (!entityCounts.TryGetValue(baseId, out int entityCount)) entityCount = 0;
+                entityCounts[baseId] = entityCount + 1;
+                string entityId = $"{baseId}_{entityCount}";
+
                 enemies.Add(new
                 {
                     index = enemyIdx++,
-                    name = creature.Monster?.GetType().Name ?? "unknown",
+                    entity_id = entityId,
+                    name = baseId,
                     hp = creature.CurrentHp,
                     max_hp = creature.MaxHp,
                     block = creature.Block,
@@ -520,7 +532,7 @@ public static class BridgeHandler
             var screen = screenInfo.Screen;
             var actions = new List<object>();
 
-            if (screen.StartsWith("COMBAT"))
+            if (screen.StartsWith("COMBAT") || screen == "HAND_SELECT")
             {
                 var cm = CombatManager.Instance;
                 if (cm?.IsInProgress == true && cm.IsPlayPhase)
@@ -528,6 +540,19 @@ public static class BridgeHandler
                     var combatState = cm.DebugOnlyGetState();
                     if (combatState != null)
                     {
+                        // Check for mid-combat hand card selection (exhaust/discard prompts)
+                        try
+                        {
+                            var playerHand = NPlayerHand.Instance;
+                            if (playerHand != null && playerHand.IsInCardSelection)
+                            {
+                                // Add combat_select_card actions for selectable hand cards
+                                actions.Add(new { action = "combat_select_card", description = "Select a card from hand for exhaust/discard" });
+                                actions.Add(new { action = "combat_confirm_selection", description = "Confirm hand card selection" });
+                            }
+                        }
+                        catch { }
+
                         // Playable cards
                         foreach (var creature in combatState.Allies)
                         {
@@ -640,6 +665,24 @@ public static class BridgeHandler
             else if (screen == "CARD_SELECTION")
             {
                 actions.AddRange(GetCardSelectionActionDescriptors());
+            }
+            else if (screen == "HAND_SELECT")
+            {
+                // Mid-combat card selection (exhaust, discard, etc.)
+                actions.Add(new { action = "combat_select_card", description = "Select a card from hand" });
+                actions.Add(new { action = "combat_confirm_selection" });
+            }
+            else if (screen == "RELIC_SELECTION")
+            {
+                // Relic selection screen
+                actions.Add(new { action = "select_relic", description = "Select a relic" });
+                actions.Add(new { action = "skip_relic_selection" });
+            }
+            else if (screen == "CARD_REWARD")
+            {
+                // Post-combat card reward selection (3 cards to choose from)
+                actions.Add(new { action = "select_card_reward", description = "Select a card reward" });
+                actions.Add(new { action = "skip_card_reward" });
             }
             else if (screen.StartsWith("MENU_"))
             {
@@ -1612,6 +1655,30 @@ public static class BridgeHandler
                 buttons.Add(btn);
             CollectButtons(child, buttons, depth - 1);
         }
+    }
+
+    /// <summary>
+    /// Find all descendant nodes of type T, sorted by visual position (Y then X).
+    /// Handles z-order scrambling from NGridCardHolder.OnFocus() calling MoveToFront().
+    /// </summary>
+    private static List<T> FindAllSortedByPosition<T>(Godot.Node start) where T : Godot.Control
+    {
+        var list = new List<T>();
+        FindAllRecursive(start, list);
+        list.Sort((a, b) =>
+        {
+            int cmp = a.GlobalPosition.Y.CompareTo(b.GlobalPosition.Y);
+            return cmp != 0 ? cmp : a.GlobalPosition.X.CompareTo(b.GlobalPosition.X);
+        });
+        return list;
+    }
+
+    private static void FindAllRecursive<T>(Godot.Node node, List<T> found) where T : Godot.Node
+    {
+        if (!Godot.GodotObject.IsInstanceValid(node)) return;
+        if (node is T item) found.Add(item);
+        foreach (var child in node.GetChildren())
+            FindAllRecursive(child, found);
     }
 
     private static object ExecuteMapTravel(int row, int col)
