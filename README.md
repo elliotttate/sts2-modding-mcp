@@ -1,22 +1,78 @@
 # STS2 Modding MCP
 
-A comprehensive [Model Context Protocol](https://modelcontextprotocol.io/) server for **Slay the Spire 2** modding. Reverse-engineers the game's C# assemblies and Godot PCK assets, providing **151 MCP tools** for querying game data, generating mod code, applying it into real projects, building/deploying mods, and driving in-game playtests from AI assistants like Claude Code.
+A comprehensive [Model Context Protocol](https://modelcontextprotocol.io/) server for **Slay the Spire 2** modding. Connects to any MCP-compatible AI assistant (Claude Code, Claude Desktop, Cursor, Windsurf, etc.) and provides **151 tools** for reverse-engineering the game, generating mod code, building/deploying, live-inspecting the running Godot engine, and autonomously playtesting mods by playing the game itself.
 
-> **New in v3.1:** Roslyn-based C# code analysis replaces regex parsing — 3,048 classes with full syntax trees, 18,279 methods with call graphs, 135 enums, inverted indexes for O(1) type/override/invocation lookups, and a new `suggest_hooks` tool for intent-based hook recommendations.
+## 🧠 About This MCP
 
-## What It Does
+This MCP can be extremely useful to help create mods. Whether you're a seasoned developer wanting to use it as an assistant or someone who is learning to mod for the first time, it can wear a lot of hats and be quite powerful and flexible.
 
-STS2 uses a modified **Godot 4.5.1 C#** engine with **.NET 9.0**. This MCP server decompiles `sts2.dll` and extracts the Godot PCK, indexing the entire game from both sides, giving you instant access to:
+> ⚠️ **Important:** Your mileage will vary drastically depending on what LLM models you're using. I personally have Claude Opus 4.6 Max and ChatGPT Codex 5.4 xHigh, and so far in testing, I've yet to find a code-related mod either of those haven't been able to make on their own + fully test and debug.
 
-- **3,048 game entities** — 577 cards, 290 relics, 261 powers, 64 potions, 119 monsters, 88 encounters, 67 events, 23 enchantments, and more
-- **144 game hooks + 175 overridable methods** — before/after events, value modifiers, boolean gates for combat, cards, damage, powers, turns, rewards, etc.
-- **39 console commands** — in-game developer commands for testing
-- **Full decompiled source** — searchable C# source for every class in the game, indexed by a Roslyn syntax tree analyzer with call graphs, type references, and inheritance chains
-- **15,000+ Godot assets** — every scene, texture, resource, script, and audio file in the game PCK, searchable by path
+This project is doubling as a fun experiment for me. Please ping me if you have any issues, can't figure something out, want to suggest a feature, find a bug, etc.
 
-It also generates production-ready mod code using [BaseLib](https://www.nuget.org/packages/Alchyr.Sts2.BaseLib) (Alchyr's community modding library) by default, with fallback to the raw game API.
+## 🔍 Game Reverse Engineering
+- Decompiles the game's C# assemblies into fully searchable source with Roslyn syntax trees, call graphs, and inheritance chains
+- Extracts and indexes **15,000+** Godot assets (scenes, textures, resources, scripts, audio)
+- Catalogs **3,048+** game entities — cards, relics, powers, potions, monsters, encounters, events, enchantments, orbs, and more
+- Maps **144 hooks** and **175 overridable methods** across the combat, card, damage, power, turn, and reward systems
 
-At the library level, `sts2mcp.mod_gen.ModGenerator` also now includes project-aware helpers for applying generated output into an existing mod project, building PCKs from the project manifest/resource layout, deploying built artifacts, and validating localization plus project-owned asset references.
+## ⚙️ Code Generation
+- Generates production-ready C# mod code for **30+ entity types** — cards, relics, powers, potions, monsters, encounters, events, characters, enchantments, orbs, keywords, mechanics, and more
+- Scaffolds complete mod projects with proper `.csproj`, manifest, localization, and folder structure
+- Generates Harmony patches (prefix, postfix, IL transpiler), reflection accessors, network messages, save data, and mod config
+- Builds programmatic Godot UI panels, combat overlays, floating panels, scrollable lists, animated bars, hover tips, and VFX particle scenes — all in C#
+- Integrates with [BaseLib](https://www.nuget.org/packages/Alchyr.Sts2.BaseLib) for abstract base classes, auto-registration, config UI, and card variables
+
+## 🧩 Code Intelligence
+- Recommends which hooks to override from natural language intent (e.g. *"make potions heal more"*)
+- Suggests Harmony patch targets for desired behavior changes
+- Traces call graphs and entity dependency maps
+- Validates mods against the current game API after updates
+- Parses build output into structured compiler errors
+
+## 🚀 Build & Deploy
+- Builds mods via `dotnet build` with structured output
+- Builds Godot PCK resource packs with automatic PNG-to-texture conversion
+- Deploys built artifacts to the game's mods folder in one step
+- Validates localization coverage, asset references, and project structure before shipping
+- Watches project files and auto-rebuilds on changes
+
+## 🌳 Live Scene Inspection
+- Browses the running game's full Godot scene tree in real time
+- Reads and writes node properties on live nodes (position, scale, color, text, visibility)
+- Toggles visibility of any visual layer to isolate and inspect UI, VFX, or game elements
+- Animates properties with Godot Tweens for live experimentation
+- Inspects all loaded .NET assemblies, types, methods, and properties at runtime
+
+## 🎮 Automated Playtesting
+- Starts seeded runs with specific characters, ascension, modifiers, and pre-configured decks/relics/gold
+- Controls every screen — combat, map, events, rewards, shops, rest sites, treasure, card selection
+- Plays cards with targeting, ends turns, uses potions, navigates maps, makes event choices, buys from shops
+- Manipulates game state mid-run — set HP/gold/energy, draw cards, add powers and relics
+- Runs at up to **20x speed** for fast iteration
+- Captures screenshots for visual verification
+
+## 🐛 Debugging
+- Sets breakpoints on specific game actions or hooks with optional conditions
+- Steps through combat one action at a time with full state inspection at each step
+- Pauses and resumes action processing while the game continues rendering
+- Saves and restores named state snapshots for A/B testing from identical game positions
+- Polls unhandled exceptions with full stack traces
+- Hot-reloads Harmony patches from a new DLL without restarting the game
+
+## 🔥 Automated Stress Testing
+- Runs fully autonomous multi-run playthroughs with configurable characters, seeds, and ascension
+- Tracks progress across runs — current floor, act, room, elapsed time, and errors
+- Configurable timeouts and watchdog behavior for detecting softlocks and crashes
+
+## 📚 Modding Guides & Reference
+- **29** built-in guide topics covering getting started, hooks, localization, Harmony, multiplayer networking, Godot UI, IL transpilers, combat deep dive, save files, RNG/determinism, accessibility, and more
+- **15** BaseLib reference docs for custom entities, config, card variables, SpireField, WeightedList, and IL patching
+- **39** in-game console commands documented with arguments and descriptions
+
+> 📌 **A note on guides:** MCPs like this live and die on how up-to-date and well-written the modding guides and references are. It will eventually figure things out with self-debugging, but adding to this database is key to being more efficient. **If you use it for a project, please have it write out additional guides and push them to the repo!**
+
+---
 
 ## Tool Highlights
 
@@ -82,6 +138,100 @@ The MCP currently exposes 151 tools. The sections below highlight the main workf
 | `bridge_get_last_errors` | Return recent bridge error/failure lines |
 
 The existing bridge combat tools are still available alongside these helpers: `bridge_ping`, `bridge_get_screen`, `bridge_get_run_state`, `bridge_get_combat_state`, `bridge_get_player_state`, `bridge_get_map_state`, `bridge_play_card`, `bridge_end_turn`, `bridge_console`, `bridge_use_potion`, `bridge_make_event_choice`, `bridge_navigate_map`, `bridge_rest_site_choice`, `bridge_shop_action`, `bridge_get_card_piles`, and `bridge_manipulate_state`.
+
+### Live Scene Inspection (GodotExplorer)
+
+A companion mod (`explorer_mod/`) runs inside the game as a TCP server on port 27020, exposing the live Godot engine to MCP tools. This lets an AI assistant — or any MCP client — see exactly what the game is rendering, drill into any node, and manipulate the scene in real time.
+
+| Tool | Description |
+|------|-------------|
+| `explorer_get_scene_tree` | Walk the full Godot scene hierarchy with configurable depth and root path |
+| `explorer_find_nodes` | Find nodes by name pattern with optional type filtering |
+| `explorer_inspect_node` | Get detailed info for a specific node — type, properties, children |
+| `explorer_get_property` | Read any property from any node in the running scene |
+| `explorer_set_property` | Write a property value on a live node (position, scale, color, text, etc.) |
+| `explorer_toggle_visibility` | Show/hide any CanvasItem node — useful for isolating visual layers |
+| `explorer_tween_property` | Animate a property with Godot Tweens (duration, loops, easing) |
+| `explorer_call_method` | Execute a method on a node with optional arguments |
+| `explorer_get_node_count` | Total node count in the scene tree |
+| `explorer_get_game_info` | Engine metadata: Godot version, FPS, window size, process name |
+| `explorer_list_assemblies` | List all loaded .NET assemblies with version and type counts |
+| `explorer_search_types` | Search for .NET types across all loaded assemblies |
+| `explorer_inspect_type` | Get detailed .NET type info — methods, properties, base class, assembly |
+| `explorer_list_groups` | List nodes in Godot groups or enumerate all groups |
+
+This is particularly valuable for understanding the game's visual structure before building UI overlays, custom characters, or VFX — you can inspect exactly how the game's own scenes are composed, what properties drive animations, and which nodes belong to which layers.
+
+### Automated Playtesting & Debugging
+
+The bridge mod (`test_mod/`) runs inside the game on TCP port 21337, turning the game into a fully programmable test harness. An AI assistant can build a mod, deploy it, launch the game, start a run, play through encounters, and verify that the mod behaves correctly — all autonomously.
+
+#### Full Game Automation
+
+The bridge can control every screen in the game, not just combat:
+
+- **Start seeded runs** with specific characters, ascension levels, modifiers, and fixture commands that pre-configure relics, cards, gold, and powers
+- **Play cards** with targeting, **end turns**, **use/discard potions**
+- **Navigate maps** by row/column, **make event choices**, **claim rewards**, **buy from shops**, **choose rest site actions**, **pick treasure**, and **select/skip/confirm cards**
+- **Execute console commands** (gold, godmode, add relics/cards, force fights, heal, etc.)
+- **Manipulate state** — set HP/gold/energy, draw cards, add powers/relics mid-run
+- **Set game speed** from 0.1x to 20x for fast-forwarding through animations
+- **Capture screenshots** at any point for visual verification
+
+#### Breakpoint Debugging
+
+The bridge includes a full action-level debugger for the game's combat system:
+
+| Tool | Description |
+|------|-------------|
+| `bridge_debug_pause` | Pause action processing — the game renders but no actions execute |
+| `bridge_debug_resume` | Resume from a breakpoint |
+| `bridge_debug_step` | Step forward by one action, or step to the next player turn |
+| `bridge_debug_set_breakpoint` | Set a breakpoint on an action type or hook, with optional conditions |
+| `bridge_debug_remove_breakpoint` | Remove a breakpoint by ID |
+| `bridge_debug_list_breakpoints` | List all breakpoints with hit counts and pause/step state |
+| `bridge_debug_clear_breakpoints` | Clear all breakpoints and disable stepping |
+| `bridge_debug_get_context` | Get the current pause context — why it paused, the current action, and a full game state snapshot |
+
+This means an AI can set a breakpoint on a specific game action (e.g. `DamageAction`), step through combat one action at a time, inspect the full game state at each step, and pinpoint exactly where a mod's behavior diverges from expectations.
+
+#### State Snapshots & A/B Testing
+
+| Tool | Description |
+|------|-------------|
+| `bridge_save_snapshot` | Save a named snapshot of the full game state |
+| `bridge_restore_snapshot` | Restore a previously saved snapshot |
+
+Snapshots enable A/B testing: save state before a mod change, restore it after rebuilding, and compare outcomes from the exact same game position.
+
+#### AutoSlay — Automated Multi-Run Stress Testing
+
+| Tool | Description |
+|------|-------------|
+| `bridge_autoslay_start` | Start automated runs with configurable character, seed, ascension, modifiers, and fixture commands |
+| `bridge_autoslay_stop` | Stop the current AutoSlay session |
+| `bridge_autoslay_status` | Get progress — runs completed, current floor/act/room, elapsed time, errors |
+| `bridge_autoslay_configure` | Configure timeouts (room, run, screen), watchdog behavior, polling intervals, max floor |
+
+AutoSlay runs the game hands-free — it makes decisions, navigates screens, plays combat, and tracks errors across multiple full runs. This is invaluable for stability testing: deploy a mod, kick off 10 automated runs, and check whether any crashes or softlocks occur.
+
+#### Event & Exception Monitoring
+
+| Tool | Description |
+|------|-------------|
+| `bridge_get_events` | Poll game events (card plays, turn ends, run starts, screenshots) since a given ID |
+| `bridge_get_exceptions` | Poll recent unhandled exceptions with full stack traces |
+| `bridge_get_game_log` | Retrieve captured game log messages filtered by level, type, or content |
+| `bridge_hot_swap_patches` | Hot-reload Harmony patches from a new DLL without restarting the game |
+
+The typical self-testing workflow looks like:
+
+```text
+build_mod → install_mod → launch_game → bridge_ping
+→ bridge_start_run → bridge_wait_for_screen("COMBAT_PLAYER_TURN")
+→ bridge_play_card → bridge_get_combat_state → (verify mod effect)
+→ bridge_get_exceptions → (check for errors)
+```
 
 ### Code Intelligence And Validation
 
