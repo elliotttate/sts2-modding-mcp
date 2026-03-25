@@ -8,6 +8,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+http = [
+    "uvicorn>=0.24",
+    "starlette>=0.38",
+]
 images = [
     "google-genai>=1.0.0",
     "Pillow>=10.0",

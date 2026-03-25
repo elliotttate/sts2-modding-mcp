@@ -1,5 +1,6 @@
 """MCP Server for Slay the Spire 2 modding."""
 
+import argparse
 import asyncio
 import json
 import os
@@ -4415,13 +4416,77 @@ async def _decompile_game(force: bool = False) -> dict:
 
 # ─── Entry Point ─────────────────────────────────────────────────────────────
 
+
+def _parse_args():
+    parser = argparse.ArgumentParser(description="STS2 Modding MCP Server")
+    parser.add_argument(
+        "--http", action="store_true",
+        help="Run as streamable HTTP server instead of stdio",
+    )
+    parser.add_argument(
+        "--host", default="127.0.0.1",
+        help="HTTP server bind address (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port", type=int, default=8090,
+        help="HTTP server port (default: 8090)",
+    )
+    return parser.parse_args()
+
+
 async def main():
+    args = _parse_args()
+
     # Auto-detect game path on first run (writes to stderr only, no MCP interference)
     auto_detect_on_startup()
 
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options(),
+    if args.http:
+        await _run_http(args.host, args.port)
+    else:
+        async with stdio_server() as (read_stream, write_stream):
+            await server.run(
+                read_stream,
+                write_stream,
+                server.create_initialization_options(),
+            )
+
+
+async def _run_http(host: str, port: int):
+    try:
+        from starlette.applications import Starlette
+        from starlette.routing import Mount
+        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+        import uvicorn
+    except ImportError:
+        print(
+            "HTTP transport requires extra dependencies.\n"
+            "Install them with:  pip install \"sts2-modding-mcp[http]\"",
+            file=sys.stderr,
         )
+        sys.exit(1)
+
+    session_manager = StreamableHTTPSessionManager(
+        app=server,
+        json_response=False,
+        stateless=False,
+    )
+
+    from contextlib import asynccontextmanager
+    from collections.abc import AsyncIterator
+
+    @asynccontextmanager
+    async def lifespan(app: Starlette) -> AsyncIterator[None]:
+        async with session_manager.run():
+            print(f"STS2 Modding MCP server running on http://{host}:{port}/mcp", file=sys.stderr)
+            yield
+
+    app = Starlette(
+        lifespan=lifespan,
+        routes=[
+            Mount("/mcp", app=session_manager.handle_request),
+        ],
+    )
+
+    config = uvicorn.Config(app, host=host, port=port, log_level="info")
+    srv = uvicorn.Server(config)
+    await srv.serve()
