@@ -96,11 +96,12 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="get_entity_source",
             description=(
-                "Get the full decompiled C# source code for any game class. "
+                "Get the full C# source code for any game class — source is already indexed and ready. "
                 "Works for cards, relics, potions, powers, monsters, encounters, events, "
                 "base classes (CardModel, RelicModel, AbstractModel, etc.), hooks, modding API, "
                 "combat system, commands, factories, and any other class in the game. "
-                "Use this to understand how existing game content works before creating mods."
+                "Use this to understand how existing game content works before creating mods. "
+                "Do NOT call decompile_game before using this."
             ),
             inputSchema={
                 "type": "object",
@@ -116,7 +117,8 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="search_game_code",
             description=(
-                "Full-text regex search through all decompiled game source code (~23MB, 1300+ files). "
+                "Full-text regex search through all indexed game source code (~23MB, 1300+ files). "
+                "The source index is pre-built and ready — do NOT call decompile_game before using this. "
                 "Use to find how specific APIs are used, locate method calls, find patterns, etc."
             ),
             inputSchema={
@@ -170,7 +172,10 @@ async def list_tools() -> list[types.Tool]:
             name="get_setup_status",
             description=(
                 "Check the server setup status: whether the game was found, .NET/ilspycmd are installed, "
-                "source is decompiled, GDRE tools are available. Use this to diagnose setup issues."
+                "source is decompiled, Roslyn index is built, GDRE tools are available. "
+                "Use this to diagnose setup issues. If decompiled_exists and roslyn_index_exists are both true, "
+                "all code lookup tools (search_game_code, get_entity_source, browse_namespace) are ready — "
+                "do NOT call decompile_game."
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
@@ -185,7 +190,8 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="browse_namespace",
             description=(
-                "List all files in a specific namespace/directory of the decompiled source. "
+                "List all files in a specific namespace/directory of the game source. "
+                "Source is already indexed — do NOT call decompile_game first. "
                 "Use list_namespaces first to see available namespaces, then browse specific ones."
             ),
             inputSchema={
@@ -612,10 +618,22 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="decompile_game",
             description=(
-                "Re-decompile sts2.dll to refresh the decompiled source. "
-                "Use after a game update to get the latest game code. Requires ilspycmd."
+                "Re-decompile sts2.dll to refresh the game source after a game UPDATE. "
+                "IMPORTANT: Do NOT call this for normal code lookups — use search_game_code, "
+                "get_entity_source, or browse_namespace instead, which work from the pre-built index. "
+                "Only call this if get_setup_status shows decompiled_exists=false, or after a game version update. "
+                "Requires ilspycmd."
             ),
-            inputSchema={"type": "object", "properties": {}},
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "force": {
+                        "type": "boolean",
+                        "description": "Force re-decompilation even if source already exists. Default false.",
+                        "default": False,
+                    },
+                },
+            },
         ),
         # ── Asset & PCK Tools ──
         types.Tool(
@@ -3362,7 +3380,7 @@ async def _handle_tool(name: str, args: dict):
         )
 
     elif name == "decompile_game":
-        return await _decompile_game()
+        return await _decompile_game(force=args.get("force", False))
 
     # ── Asset & PCK ──
     elif name == "build_pck":
@@ -4334,10 +4352,31 @@ def _launch_game(remote_debug: bool = False, renderer: str | None = None, extra_
         return {"success": False, "error": str(e)}
 
 
-async def _decompile_game() -> dict:
+async def _decompile_game(force: bool = False) -> dict:
     from .setup import _find_ilspycmd
 
     from .setup import find_game_binary
+
+    output_dir = Path(DECOMPILED_DIR)
+
+    # Guard: skip if source already exists (unless forced)
+    if not force and output_dir.exists():
+        cs_files = list(output_dir.rglob("*.cs"))
+        if len(cs_files) > 100:
+            roslyn_exists = (output_dir / "roslyn_index.json").exists()
+            return {
+                "success": True,
+                "already_decompiled": True,
+                "cs_file_count": len(cs_files),
+                "roslyn_index_exists": roslyn_exists,
+                "message": (
+                    f"Source already decompiled ({len(cs_files)} files). "
+                    f"Roslyn index: {'ready' if roslyn_exists else 'will auto-build on first query'}. "
+                    "Use search_game_code, get_entity_source, or browse_namespace to search the code. "
+                    "Pass force=true to re-decompile (only needed after a game update)."
+                ),
+            }
+
     dll_path_str = find_game_binary(GAME_DIR)
     if not dll_path_str:
         return {"success": False, "error": f"Game binary not found in {GAME_DIR}"}
@@ -4347,7 +4386,6 @@ async def _decompile_game() -> dict:
     if not exe:
         return {"success": False, "error": "ilspycmd not found. Install: dotnet tool install -g ilspycmd"}
 
-    output_dir = Path(DECOMPILED_DIR)
     # Clear existing
     if output_dir.exists():
         import shutil

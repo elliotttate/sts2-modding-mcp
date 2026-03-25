@@ -165,7 +165,7 @@ class GameDataIndex:
         if not self.decompiled_path.exists():
             raise FileNotFoundError(
                 f"Decompiled source not found at {self.decompiled_path}. "
-                "Run 'python -m sts2mcp.setup' to auto-configure, or use the 'decompile_game' tool."
+                "Run 'python -m sts2mcp.setup' to auto-configure, or check get_setup_status for details."
             )
 
         index_path = self.decompiled_path / "roslyn_index.json"
