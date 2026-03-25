@@ -1,4 +1,4 @@
-using Alchyr.Sts2.BaseLib.Attributes;
+using BaseLib.Abstracts;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Logging;

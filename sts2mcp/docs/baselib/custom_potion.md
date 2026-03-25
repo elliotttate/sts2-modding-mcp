@@ -4,7 +4,7 @@ Extends `PotionModel` with automatic registration and pool management.
 
 ## Base Class
 ```csharp
-using Alchyr.Sts2.BaseLib.Potions;
+using BaseLib.Abstracts;
 
 public sealed class MyPotion : CustomPotionModel
 {

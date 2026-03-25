@@ -33,8 +33,25 @@ The PCK `base_prefix` (set via `pck_name` in the manifest) **must exactly match*
 **Best practice:** Always use lowercase for both `id` and `pck_name` in `mod_manifest.json`.
 
 ## Key Format
-Keys use SCREAMING_SNAKE_CASE model IDs:
-`MY_CARD.title`, `MY_CARD.description`, `MY_CARD.upgrade.description`
+Keys use SCREAMING_SNAKE_CASE model IDs derived from the C# class name via `StringHelper.Slugify()`:
+- Insert underscore before each capital letter following a lowercase letter/digit
+- Convert to uppercase
+- Remove non-alphanumeric characters (except underscore)
+
+Examples: `ShrugItOff` → `SHRUG_IT_OFF`, `GoForTheEyes` → `GO_FOR_THE_EYES`, `DefendIronclad` → `DEFEND_IRONCLAD`, `IAmInvincible` → `I_AM_INVINCIBLE`
+
+Standard suffixes: `.title`, `.description`, `.upgrade.description`, `.flavor`
+
+The game resolves card titles via: `new LocString("cards", Id.Entry + ".title")` where `Id.Entry` = `StringHelper.Slugify(className)`.
+
+## Overriding Base Game Text (Total Conversion)
+Since mod localization keys **overwrite** base game keys, you can rename every entity in the game by providing JSON files with matching keys. For example, to rename the Ironclad's "Bash" card:
+```json
+{
+  "BASH.title": "Goblin Stomper"
+}
+```
+The original description text is preserved unless you also override `.description`. This makes localization-only total conversion mods straightforward — no C# code needed for pure renames.
 
 ## Rich Text Tags
 - `[gold]keyword name[/gold]` - Gold color for game keywords

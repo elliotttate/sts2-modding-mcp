@@ -1,6 +1,6 @@
 using System.Collections.Generic;
-using Alchyr.Sts2.BaseLib;
-using Alchyr.Sts2.BaseLib.Attributes;
+using BaseLib;
+using BaseLib.Abstracts;
 using MegaCrit.Sts2.Core.Models.Cards;
 
 namespace {namespace}.Keywords;

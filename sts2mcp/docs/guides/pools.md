@@ -64,15 +64,51 @@ ModHelper.AddModelToPool<IroncladCardPool, MyCard>();
 
 ## Custom Pools (BaseLib)
 BaseLib provides custom pool base classes for mod-specific pools:
-- `CustomCardPoolModel` — supports custom card frames via `FramePath`/`FrameMaterial`
+- `CustomCardPoolModel` — supports custom card frames via H/S/V color, `DeckEntryCardColor`
 - `CustomRelicPoolModel` — custom relic pool for character mods
+- `CustomPotionPoolModel` — custom potion pool for character mods
+
+All three are in `BaseLib.Abstracts`. The `[Pool]` attribute is in `BaseLib.Utils`.
 
 ```csharp
-public class MyCharacterCardPool : CustomCardPoolModel { }
+using BaseLib.Abstracts;
+using BaseLib.Utils;
+using Godot;
+
+public class MyCharacterCardPool : CustomCardPoolModel
+{
+    public override string Title => "mychar";
+    public override float H => 0.5f;   // Hue
+    public override float S => 1f;     // Saturation
+    public override float V => 1f;     // Value
+    public override Color DeckEntryCardColor => new("ff6644");
+    public override bool IsColorless => false;
+    public override bool IsShared => false;
+}
 
 [Pool(typeof(MyCharacterCardPool))]
 public sealed class MyCard : CustomCardModel { ... }
 ```
+
+With BaseLib custom pools, cards auto-register via `[Pool]` — you do NOT need to override `GenerateAllCards()`.
+
+## CRITICAL: Every Custom Entity Needs [Pool]
+
+When using BaseLib's `CustomCardModel` / `CustomRelicModel` / `CustomPotionModel`, **every entity class MUST have a `[Pool]` attribute**. Without it, BaseLib throws a fatal runtime exception during game startup:
+```
+System.Exception: Model MyMod.MyCard must be marked with a PoolAttribute to determine which pool to add it to.
+```
+
+This applies to ALL card types including curses and status cards:
+```csharp
+[Pool(typeof(CurseCardPool))]    // Curses go in CurseCardPool
+public sealed class MyCurse : CustomCardModel { ... }
+
+[Pool(typeof(StatusCardPool))]   // Status cards go in StatusCardPool
+public sealed class MyStatus : CustomCardModel { ... }
+```
+
+Powers (`CustomPowerModel`) do NOT need pool attributes — they are registered automatically.
 
 ## Pool and Rarity Interaction
 Within a pool, entities are further filtered by rarity when the game generates rewards, shop items, or other offerings. Common items appear more frequently than Rare ones.

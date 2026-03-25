@@ -4,7 +4,7 @@ Extends `CardModel` with automatic registration, custom frames, and convenience 
 
 ## Base Class
 ```csharp
-using Alchyr.Sts2.BaseLib.Cards;
+using BaseLib.Abstracts;
 
 public sealed class MyCard : CustomCardModel
 {
@@ -32,7 +32,7 @@ public sealed class MyCard(int cost, CardType type, CardRarity rarity, TargetTyp
 
 ## Pool Registration
 ```csharp
-using Alchyr.Sts2.BaseLib.Cards;
+using BaseLib.Abstracts;
 
 // Use CustomCardPoolModel for custom frame support
 [Pool(typeof(MyCardPool))]

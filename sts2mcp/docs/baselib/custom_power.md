@@ -4,7 +4,7 @@ Extends `PowerModel` with custom icon support and ID management.
 
 ## Base Class
 ```csharp
-using Alchyr.Sts2.BaseLib.Powers;
+using BaseLib.Abstracts;
 using MegaCrit.Sts2.Core.Models.Powers;
 
 public sealed class MyPower : CustomPowerModel

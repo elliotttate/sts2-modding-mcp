@@ -4,7 +4,7 @@ Extends `RelicModel` with automatic registration and ID management.
 
 ## Base Class
 ```csharp
-using Alchyr.Sts2.BaseLib.Relics;
+using BaseLib.Abstracts;
 
 public sealed class MyRelic : CustomRelicModel
 {

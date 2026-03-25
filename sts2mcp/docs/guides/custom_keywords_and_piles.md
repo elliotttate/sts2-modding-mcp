@@ -4,7 +4,7 @@
 Create new card keywords like "Stitch", "Woven", "Dissolve":
 
 ```csharp
-using Alchyr.Sts2.BaseLib.Attributes;
+using BaseLib.Abstracts;
 using MegaCrit.Sts2.Core.Models.Cards;
 
 public static class MyKeyword

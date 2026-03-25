@@ -41,6 +41,19 @@ Common causes:
 - Wrong .NET target — must be `net9.0`
 - Missing NuGet packages — run `dotnet restore`
 - BaseLib reference missing — add `<PackageReference Include="Alchyr.Sts2.BaseLib" Version="0.1.*" />`
+- **Wrong BaseLib namespace** — The NuGet package is `Alchyr.Sts2.BaseLib` but the C# namespaces are `BaseLib.Abstracts`, `BaseLib.Utils`, `BaseLib.Cards`, etc. Do NOT use `using Alchyr.Sts2.BaseLib.*;`
+- **PoolAttribute not found** — `[Pool]` is in `using BaseLib.Utils;`, NOT in `BaseLib.Abstracts`
+
+### "Model must be marked with a PoolAttribute"
+Runtime error during game startup. Every `CustomCardModel`, `CustomRelicModel`, and `CustomPotionModel` needs a `[Pool(typeof(...))]` attribute. This includes curse cards (`CurseCardPool`) and status cards (`StatusCardPool`). Add `using BaseLib.Utils;` for the attribute.
+
+### "ModelNotFoundException: Model id=POWER.MYMOD-MY_POWER not found"
+A power failed to register during ModelDb initialization. Common causes:
+- Constructor threw an exception (check log above this error for the root cause)
+- A cascading failure from another model's registration error (fix the first error first)
+- Invalid property override (e.g., wrong `PowerStackType` or `PowerType` enum value)
+
+Valid `PowerStackType` values: `None`, `Counter`, `Single`
 
 ### "Hook method signature mismatch"
 The game updated and a hook's parameters changed. Use:
@@ -133,6 +146,46 @@ Self-targeting potions (Flex Potion, Fortifier) must always target the player's 
 
 ### Async deadlocks during EndTurn or enemy actions
 `Task.Yield()` and `Cmd.Wait()` can cause deadlocks when async continuations don't complete. See the `advanced_harmony` guide for patterns to suppress yields during critical sections and patch `Cmd.Wait()` for testing/headless contexts.
+
+## Common API Gotchas
+
+### No MagicVar class
+The game has no `MagicVar`. For generic numeric values, use a named `DynamicVar`:
+```csharp
+new DynamicVar("Amount", 3m)       // access via DynamicVars["Amount"]
+new DynamicVar("HitCount", 4m)     // access via DynamicVars["HitCount"]
+```
+Named vars used by the game: `DamageVar`, `BlockVar`, `HealVar`, `HpLossVar`, `EnergyVar`, `CardsVar`, `PowerVar<T>`.
+
+### No Scry in STS2
+Unlike STS1, there is no Scry mechanic or `CardPileCmd.Scry` method. Cards that "look at the top of the deck" need alternative implementations.
+
+### Creature.CurrentHp is read-only
+Use `CreatureCmd.SetCurrentHp()`, `CreatureCmd.Heal()`, or `CreatureCmd.LoseHp()` instead of assigning directly.
+
+### RelicRarity enum
+Values: `None`, `Starter`, `Common`, `Uncommon`, `Rare`, `Shop`, `Event`, `Ancient`. There is no `Boss` — use `Ancient` for boss-tier relics.
+
+### PowerStackType enum
+Values: `None`, `Counter`, `Single`. There is no `IntensityThenDuration`.
+
+### GainBlock signature
+```csharp
+CreatureCmd.GainBlock(Creature creature, decimal amount, ValueProp props, CardPlay? cardPlay, bool fast = false)
+CreatureCmd.GainBlock(Creature creature, BlockVar blockVar, CardPlay? cardPlay, bool fast = false)
+```
+
+### CreatureCmd.Damage ambiguity
+The last parameter can be either `CardModel?` or `Creature?`. Disambiguate with a cast:
+```csharp
+await CreatureCmd.Damage(ctx, creature, 5m, ValueProp.Unblockable, (CardModel?)null);
+```
+
+### Player.MaxHp doesn't exist
+Use `player.Creature.MaxHp` instead.
+
+### CardEnergyCost properties
+Use `EnergyCost.GetWithModifiers(CostModifiers.None)` to read cost. Use `EnergyCost.SetThisTurnOrUntilPlayed(0)` to set a card to cost 0 this turn.
 
 ## Common Code Patterns
 

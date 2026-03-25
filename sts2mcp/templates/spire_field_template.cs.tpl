@@ -1,4 +1,4 @@
-using Alchyr.Sts2.BaseLib.Utils;
+using BaseLib.Utils;
 
 namespace {namespace}.Fields;
 
