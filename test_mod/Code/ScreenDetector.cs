@@ -223,6 +223,8 @@ public static class ScreenDetector
                 => "EVENT",
             var s when s.Contains("Map", StringComparison.OrdinalIgnoreCase)
                 => "MAP",
+            var s when s.Contains("SingleplayerSubmenu", StringComparison.OrdinalIgnoreCase)
+                => "SINGLEPLAYER_MENU",
             var s when s.Contains("CharacterSelect", StringComparison.OrdinalIgnoreCase)
                 || s.Contains("CharSelect", StringComparison.OrdinalIgnoreCase)
                 => "CHARACTER_SELECT",

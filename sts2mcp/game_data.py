@@ -35,6 +35,7 @@ NAMESPACE_TO_TYPE = {
     "MegaCrit.Sts2.Core.Models.Acts": "act",
     "MegaCrit.Sts2.Core.Models.Modifiers": "modifier",
     "MegaCrit.Sts2.Core.Models.Orbs": "orb",
+    "MegaCrit.Sts2.Core.Models.Achievements": "achievement",
     "MegaCrit.Sts2.Core.Models.Singleton": "singleton",
     "MegaCrit.Sts2.Core.Models": "model_base",
     "MegaCrit.Sts2.Core.GameActions": "game_action",

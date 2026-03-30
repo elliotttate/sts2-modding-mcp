@@ -182,8 +182,30 @@ def get_character_asset_paths(char_id: str, mod_name: str) -> dict:
             f"{cid}.pronounObject": "them",
             f"{cid}.possessiveAdjective": "their",
             f"{cid}.pronounPossessive": "theirs",
-            f"{char_id.upper()}.title": char_id.upper(),
+            f"{char_id.upper()}.title": char_id,
             f"{char_id.upper()}.description": f"TODO: {char_id} character description",
+        },
+        "energy_counter_layers": {
+            "note": "Energy counter needs 5 layer PNGs (index 0-4) stacked to form the orb",
+            "layers": [
+                f"res://{mod_name}/Characters/{char_id}/energy_counters/{cid}_orb_layer_0.png — Background/shadow",
+                f"res://{mod_name}/Characters/{char_id}/energy_counters/{cid}_orb_layer_1.png — Orb body",
+                f"res://{mod_name}/Characters/{char_id}/energy_counters/{cid}_orb_layer_2.png — Inner glow",
+                f"res://{mod_name}/Characters/{char_id}/energy_counters/{cid}_orb_layer_3.png — Highlight/detail",
+                f"res://{mod_name}/Characters/{char_id}/energy_counters/{cid}_orb_layer_4.png — Foreground overlay",
+            ],
+        },
+        "card_pool_energy_icons": {
+            "big": f"res://{mod_name}/Characters/{char_id}/ui/{cid}_energy_icon.png",
+            "text": f"res://{mod_name}/Characters/{char_id}/ui/text_{cid}_energy_icon.png",
+            "note": "Energy icons displayed on card cost. Big ~48x48, text ~16x16.",
+        },
+        "multiplayer_hands": {
+            "pointing": f"res://{mod_name}/Characters/{char_id}/hands/multiplayer_hand_{cid}_point.png",
+            "rock": f"res://{mod_name}/Characters/{char_id}/hands/multiplayer_hand_{cid}_rock.png",
+            "paper": f"res://{mod_name}/Characters/{char_id}/hands/multiplayer_hand_{cid}_paper.png",
+            "scissors": f"res://{mod_name}/Characters/{char_id}/hands/multiplayer_hand_{cid}_scissors.png",
+            "note": "Hand gesture textures for Rock-Paper-Scissors in multiplayer mode.",
         },
     }
 
@@ -268,8 +290,8 @@ def scaffold_character_assets(
         f"{snake_name}.pronounObject": "them",
         f"{snake_name}.possessiveAdjective": "their",
         f"{snake_name}.pronounPossessive": "theirs",
-        f"{class_name.upper()}.title": class_name.upper(),
-        f"{class_name.upper()}.description": f"A mysterious new character joins the Spire.",
+        f"{class_name.upper()}.title": class_name,
+        f"{class_name.upper()}.description": "A new character joins the Spire.",
     }
     (loc_dir / "characters.json").write_text(json.dumps(char_loc, indent=2))
     created_files.append(f"{mod_name}/localization/eng/characters.json")
@@ -284,6 +306,10 @@ def scaffold_character_assets(
         f"{mod_name}/Characters/{class_name}/character_icon_{snake_name}_outline.png — Top panel icon outline",
         f"{mod_name}/Characters/{class_name}/icon.png — General icon (64x64)",
         f"{mod_name}/Characters/{class_name}/map_marker_{snake_name}.png — Map marker icon (small)",
+        f"{mod_name}/Characters/{class_name}/energy_counters/{snake_name}_orb_layer_0..4.png — 5 energy counter layer PNGs (background, body, inner glow, highlight, overlay)",
+        f"{mod_name}/Characters/{class_name}/ui/{snake_name}_energy_icon.png — Card pool energy icon (~48x48)",
+        f"{mod_name}/Characters/{class_name}/ui/text_{snake_name}_energy_icon.png — Card pool text energy icon (~16x16)",
+        f"{mod_name}/Characters/{class_name}/hands/multiplayer_hand_{snake_name}_point/rock/paper/scissors.png — Multiplayer RPS hand gestures (optional)",
     ]
 
     return {

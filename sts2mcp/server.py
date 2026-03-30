@@ -214,10 +214,11 @@ async def list_tools() -> list[types.Tool]:
             name="get_modding_guide",
             description=(
                 "Get contextual documentation for modding STS2. Covers 40+ topics including content creation "
-                "(cards, relics, powers, potions, monsters, encounters, events, enchantments, orbs, modifiers), "
+                "(cards, relics, powers, potions, monsters, encounters, events, enchantments, orbs, modifiers, custom_characters), "
                 "systems (hooks, pools, combat_deep_dive, dynamic_vars, game_actions, mechanics, vfx_scenes, overlays), "
                 "infrastructure (harmony_patches, localization, building, project_structure, resource_loading, godot_ui_construction), "
-                "BaseLib (custom_keywords_and_piles, mod_config_integration), advanced (reflection_patterns, advanced_harmony, "
+                "BaseLib (custom_keywords_and_piles, mod_config_integration), audio (audio — FMOD custom sounds, replacements, banks), "
+                "advanced (reflection_patterns, advanced_harmony, "
                 "multiplayer_networking, rng_and_determinism, save_file_format, fastmp), and testing/debugging "
                 "(debugging, testing, autoslay, console, bridge_setup, troubleshooting, workflows, game_log_parsing)."
             ),
@@ -243,7 +244,8 @@ async def list_tools() -> list[types.Tool]:
                             "enchantments", "orbs", "game_actions",
                             "overlays", "dynamic_vars", "mechanics",
                             "vfx_scenes", "ui_elements", "fastmp",
-                            "console_commands",
+                            "console_commands", "custom_characters",
+                            "audio", "hot_reload",
                         ],
                     },
                 },
@@ -361,7 +363,7 @@ async def list_tools() -> list[types.Tool]:
                     "mod_namespace": {"type": "string"},
                     "class_name": {"type": "string"},
                     "rarity": {"type": "string", "enum": ["Common", "Uncommon", "Rare"], "default": "Common"},
-                    "usage": {"type": "string", "enum": ["CombatOnly", "OutOfCombat", "Anywhere"], "default": "CombatOnly"},
+                    "usage": {"type": "string", "enum": ["CombatOnly", "AnyTime", "Automatic"], "default": "CombatOnly"},
                     "target_type": {"type": "string", "enum": ["None", "AnyEnemy", "AnyAlly", "AnyPlayer", "AllEnemies"], "default": "None"},
                     "pool": {"type": "string", "default": "SharedPotionPool"},
                     "block": {"type": "integer", "default": 0},
@@ -468,7 +470,9 @@ async def list_tools() -> list[types.Tool]:
             description=(
                 "Generate a custom playable character class with card/relic/potion pools. "
                 "REQUIRES BaseLib (Alchyr.Sts2.BaseLib). Generates CustomCharacterModel subclass "
-                "with pool models, starter deck/relics, and visual asset paths."
+                "with pool models, starter deck/relics, visual asset paths, energy counter, "
+                "color theming, animation setup, and multiplayer hand gesture stubs. "
+                "Use scaffold_character_assets to create the required Godot scene files."
             ),
             inputSchema={
                 "type": "object",
@@ -478,7 +482,42 @@ async def list_tools() -> list[types.Tool]:
                     "class_name": {"type": "string", "description": "Character class name (PascalCase)"},
                     "starting_hp": {"type": "integer", "default": 80},
                     "starting_gold": {"type": "integer", "default": 99},
-                    "orb_slots": {"type": "integer", "default": 0},
+                    "color": {
+                        "type": "string",
+                        "default": "0.5f, 0.5f, 0.5f",
+                        "description": "C# Color constructor args (RGB floats like '0.5f, 0.0f, 0.5f' or hex like '\"ff6644\"')",
+                    },
+                    "gender": {
+                        "type": "string",
+                        "enum": ["Neutral", "Masculine", "Feminine"],
+                        "default": "Neutral",
+                        "description": "CharacterGender for pronoun usage in combat text",
+                    },
+                    "attack_anim_delay": {
+                        "type": "number",
+                        "default": 0.15,
+                        "description": "Seconds to delay attack animation (default 0.15)",
+                    },
+                    "cast_anim_delay": {
+                        "type": "number",
+                        "default": 0.25,
+                        "description": "Seconds to delay cast/skill animation (default 0.25)",
+                    },
+                    "card_hue": {
+                        "type": "number",
+                        "default": 0.5,
+                        "description": "HSV hue for card pool frame color (0-1, e.g. 0.0=red, 0.33=green, 0.66=blue, 0.75=purple)",
+                    },
+                    "starter_cards": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Starter card class names (e.g. ['StrikeMyChar', 'StrikeMyChar', 'DefendMyChar', 'DefendMyChar', 'SpecialStarter'])",
+                    },
+                    "starter_relics": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Starter relic class names (e.g. ['MyStarterRelic'])",
+                    },
                 },
                 "required": ["mod_namespace", "mod_name", "class_name"],
             },
@@ -522,7 +561,7 @@ async def list_tools() -> list[types.Tool]:
                 "Get documentation for BaseLib (Alchyr.Sts2.BaseLib) - the community modding library. "
                 "Topics: overview, custom_card, custom_relic, custom_power, custom_potion, "
                 "custom_character, custom_ancient, config, card_variables, common_actions, "
-                "spire_field, weighted_list, il_patching, mod_interop, utilities."
+                "spire_field, weighted_list, il_patching, mod_interop, utilities, fmod_audio."
             ),
             inputSchema={
                 "type": "object",
@@ -534,11 +573,36 @@ async def list_tools() -> list[types.Tool]:
                             "custom_potion", "custom_character", "custom_ancient",
                             "config", "card_variables", "common_actions",
                             "spire_field", "weighted_list", "il_patching",
-                            "mod_interop", "utilities",
+                            "mod_interop", "utilities", "fmod_audio",
                         ],
                     },
                 },
                 "required": ["topic"],
+            },
+        ),
+        types.Tool(
+            name="list_game_audio",
+            description=(
+                "Search the game's FMOD audio events, buses, and banks. "
+                "The game has 563 FMOD events across 12 banks. Use this to find event paths for specific sounds "
+                "(e.g. 'merchant' to find merchant voice lines, 'attack' for attack sounds, 'act2' for act 2 music). "
+                "Returns event paths, GUIDs, parameters, and bank info."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search term to filter events/buses (case-insensitive substring match on paths). "
+                                       "Examples: 'merchant', 'attack', 'music', 'ambience', 'ui/clicks', 'block'",
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": ["events", "buses", "banks", "global_parameters", "all"],
+                        "description": "What to search. Default: events",
+                    },
+                },
+                "required": ["query"],
             },
         ),
         # ── Build & Deploy Tools ──
@@ -1886,6 +1950,140 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="bridge_hot_reload",
+            description=(
+                "Hot-reload a mod without restarting the game. Three tiers: "
+                "tier 1 = Harmony patches only, "
+                "tier 2 (default) = patches + entity models (cards/relics/powers/potions re-registered in ModelDb) + localization, "
+                "tier 3 = tier 2 + PCK resource remount. "
+                "Automatically detects AbstractModel subtypes from the new assembly and "
+                "re-registers them in ModelDb. When pool_registrations are omitted, discovers "
+                "[Pool(typeof(...))] attributes via reflection on the compiled assembly (100% accurate). "
+                "Uses a separate Harmony instance so MCPTest's own patches are preserved, and "
+                "cleans up stale patches from old assemblies. Pool refresh is scoped to the "
+                "reloaded mod only — other mods' registrations are not affected. "
+                "Live instances (NCard, NRelic, NPower, NPotion) are refreshed in the scene tree. "
+                "For most use cases prefer hot_reload_project which auto-discovers DLL/PCK paths. "
+                "See get_modding_guide topic 'hot_reload' for full protocol reference and non-MCP usage."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dll_path": {
+                        "type": "string",
+                        "description": "Absolute path to the built mod DLL",
+                    },
+                    "tier": {
+                        "type": "integer",
+                        "enum": [1, 2, 3],
+                        "default": 2,
+                        "description": "Reload tier: 1=patches, 2=entities+patches+loc, 3=full+PCK",
+                    },
+                    "pck_path": {
+                        "type": "string",
+                        "description": "Path to PCK file to remount (tier 3 only)",
+                    },
+                    "pool_registrations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "pool_type": {"type": "string", "description": "Pool class name (e.g. SharedRelicPool)"},
+                                "model_type": {"type": "string", "description": "Entity class name (e.g. MyRelic)"},
+                            },
+                            "required": ["pool_type", "model_type"],
+                        },
+                        "description": "Pool registrations for entities that need to appear in card/relic/potion pools",
+                    },
+                },
+                "required": ["dll_path"],
+            },
+        ),
+        types.Tool(
+            name="hot_reload_project",
+            description=(
+                "Build, deploy, and hot-reload a mod project in one step. "
+                "Automatically finds the deployed DLL/PCK and, when pool_registrations are omitted, "
+                "lets the C# bridge discover them via assembly reflection (100% accurate). "
+                "Runs async so the MCP server stays responsive during build. "
+                "Use this for manual iteration when you want a project-aware workflow instead of passing low-level paths. "
+                "For continuous auto-reload on save, use watch_project instead. "
+                "See get_modding_guide topic 'hot_reload' for tier details and limitations."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_dir": {"type": "string", "description": "Path to the mod project directory"},
+                    "mods_dir": {"type": "string", "description": "Game mods directory path"},
+                    "mod_name": {"type": "string", "description": "Install name override"},
+                    "configuration": {"type": "string", "default": "Debug"},
+                    "tier": {
+                        "type": "integer",
+                        "enum": [1, 2, 3],
+                        "description": "Optional hot reload tier override. Defaults to tier 3 for PCK projects, otherwise tier 2.",
+                    },
+                    "build_pck_first": {
+                        "type": "boolean",
+                        "description": "Override whether the project PCK should be rebuilt before deployment",
+                    },
+                    "auto_detect_pools": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "If true, infer pool registrations from `[Pool(typeof(...))]` attributes when pool_registrations is omitted",
+                    },
+                    "pool_registrations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "pool_type": {"type": "string"},
+                                "model_type": {"type": "string"},
+                            },
+                            "required": ["pool_type", "model_type"],
+                        },
+                        "description": "Explicit pool registrations to use instead of auto-discovery",
+                    },
+                },
+                "required": ["project_dir", "mods_dir"],
+            },
+        ),
+        types.Tool(
+            name="bridge_reload_localization",
+            description=(
+                "Reload localization tables from disk without rebuilding. "
+                "Picks up changed JSON localization files from mod PCK or override directories. "
+                "Triggers UI text refresh via locale change notification."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_reload_history",
+            description=(
+                "Get the history of recent hot reloads with timestamps, entity counts, "
+                "errors, and warnings. Useful for debugging reload failures across a session."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_hot_reload_progress",
+            description=(
+                "Get the current step of an in-progress hot reload. Returns the step name "
+                "and whether a reload is currently in progress. Useful for monitoring long reloads."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bridge_refresh_live_instances",
+            description=(
+                "Refresh live card, relic, power, potion, and monster instances in the running game after hot reload. "
+                "Walks the Godot scene tree and re-sets Model properties on NCard, NRelic, NPower, NPotion, and NCreature "
+                "nodes to fresh instances from ModelDb. Makes changes visible immediately in the current combat "
+                "without requiring a new encounter. Called automatically during tier 2+ hot_reload, "
+                "but can be invoked standalone to force a visual refresh."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
             name="bridge_set_game_speed",
             description=(
                 "Set the game speed multiplier for faster testing. "
@@ -2402,8 +2600,14 @@ async def list_tools() -> list[types.Tool]:
             name="watch_project",
             description=(
                 "Start watching a mod project for file changes and auto-rebuild+deploy on save. "
-                "Monitors .cs, .json, .tscn, .tres files. Debounces builds by 1.5s. "
-                "Eliminates the manual build-deploy cycle during development."
+                "Monitors code plus common asset/resource file types via single tree walk. Debounces 1.5s. "
+                "When auto_reload is enabled (default), automatically hot-reloads the mod in-game "
+                "after each successful build — patches, entity models, localization, and PCK assets "
+                "are all updated without restarting. Tier is auto-detected from changed file types "
+                "(PCK is only rebuilt when resource files actually change, not for CS-only edits). "
+                "Pool registrations are auto-discovered via assembly reflection when not provided explicitly. "
+                "Non-resource JSON (mod_manifest.json, mod_config.json) is ignored. "
+                "See get_modding_guide topic 'hot_reload' for tier details and limitations."
             ),
             inputSchema={
                 "type": "object",
@@ -2412,19 +2616,57 @@ async def list_tools() -> list[types.Tool]:
                     "mods_dir": {"type": "string", "description": "Game mods directory path"},
                     "mod_name": {"type": "string", "description": "Install name override"},
                     "configuration": {"type": "string", "default": "Debug"},
+                    "auto_reload": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Auto hot-reload in-game after successful build+deploy (requires game running with bridge)",
+                    },
+                    "debounce_seconds": {
+                        "type": "number",
+                        "default": 1.5,
+                        "description": "Seconds to wait after last file change before triggering build (default 1.5)",
+                    },
+                    "pool_registrations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "pool_type": {"type": "string"},
+                                "model_type": {"type": "string"},
+                            },
+                            "required": ["pool_type", "model_type"],
+                        },
+                        "description": "Optional pool registrations to apply on each hot reload. If omitted, the watcher will infer them from `[Pool(typeof(...))]` attributes.",
+                    },
                 },
                 "required": ["project_dir", "mods_dir"],
             },
         ),
         types.Tool(
             name="stop_watching",
-            description="Stop the active file watcher for auto-rebuild.",
-            inputSchema={"type": "object", "properties": {}},
+            description="Stop a file watcher for auto-rebuild. If project_dir is omitted, stops all active watchers.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_dir": {
+                        "type": "string",
+                        "description": "Path to the mod project directory to stop watching. Omit to stop all watchers.",
+                    },
+                },
+            },
         ),
         types.Tool(
             name="watcher_status",
-            description="Get the status of the active file watcher (running, build count, last result).",
-            inputSchema={"type": "object", "properties": {}},
+            description="Get the status of file watcher(s). If project_dir is omitted, returns status of all active watchers.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_dir": {
+                        "type": "string",
+                        "description": "Path to a specific project to get status for. Omit for all watchers.",
+                    },
+                },
+            },
         ),
         # ── Analysis Tools ──
         types.Tool(
@@ -3338,7 +3580,13 @@ async def _handle_tool(name: str, args: dict):
             class_name=args["class_name"],
             starting_hp=args.get("starting_hp", 80),
             starting_gold=args.get("starting_gold", 99),
-            orb_slots=args.get("orb_slots", 0),
+            color=args.get("color", "0.5f, 0.5f, 0.5f"),
+            gender=args.get("gender", "Neutral"),
+            attack_anim_delay=args.get("attack_anim_delay", 0.15),
+            cast_anim_delay=args.get("cast_anim_delay", 0.25),
+            card_hue=args.get("card_hue", 0.5),
+            starter_cards=args.get("starter_cards"),
+            starter_relics=args.get("starter_relics"),
         )
 
     elif name == "generate_mod_config":
@@ -3721,6 +3969,9 @@ async def _handle_tool(name: str, args: dict):
     elif name == "list_game_vfx":
         return analyzer.list_game_vfx(query=args.get("query", ""))
 
+    elif name == "list_game_audio":
+        return _list_game_audio(args.get("query", ""), args.get("category", "events"))
+
     # ── Extended Bridge ──
     elif name == "bridge_use_potion":
         from . import bridge_client
@@ -3842,6 +4093,47 @@ async def _handle_tool(name: str, args: dict):
     elif name == "bridge_hot_swap_patches":
         from . import bridge_client
         return await _call_bridge(bridge_client.hot_swap_patches, args["dll_path"])
+
+    elif name == "bridge_hot_reload":
+        from . import bridge_client
+        return await _call_bridge(
+            bridge_client.hot_reload,
+            dll_path=args["dll_path"],
+            tier=args.get("tier", 2),
+            pck_path=args.get("pck_path", ""),
+            pool_registrations=args.get("pool_registrations"),
+        )
+
+    elif name == "hot_reload_project":
+        from .hot_reload import build_deploy_and_hot_reload_project
+        return await asyncio.to_thread(
+            build_deploy_and_hot_reload_project,
+            project_dir=args["project_dir"],
+            mods_dir=args["mods_dir"],
+            mod_name=args.get("mod_name", ""),
+            configuration=args.get("configuration", "Debug"),
+            tier=args.get("tier"),
+            build_pck_first=args.get("build_pck_first"),
+            game_dir=GAME_DIR,
+            auto_detect_pools=args.get("auto_detect_pools", True),
+            pool_registrations=args.get("pool_registrations"),
+        )
+
+    elif name == "bridge_reload_localization":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.reload_localization)
+
+    elif name == "bridge_reload_history":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.reload_history)
+
+    elif name == "bridge_hot_reload_progress":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.hot_reload_progress)
+
+    elif name == "bridge_refresh_live_instances":
+        from . import bridge_client
+        return await _call_bridge(bridge_client.refresh_live_instances)
 
     elif name == "bridge_set_game_speed":
         from . import bridge_client
@@ -4018,20 +4310,46 @@ async def _handle_tool(name: str, args: dict):
     # ── File Watcher ──
     elif name == "watch_project":
         from .file_watcher import start_watching
+
+        async def _notify(data: dict) -> None:
+            try:
+                await server.request_context.session.send_log_message(
+                    level="info",
+                    data=json.dumps(data, default=str),
+                    logger="watcher",
+                )
+            except Exception:
+                pass  # Notification is best-effort
+
+        # Build a sync wrapper that schedules the async notification
+        import asyncio
+        _loop = asyncio.get_event_loop()
+
+        def _on_notification(data: dict) -> None:
+            try:
+                _loop.call_soon_threadsafe(asyncio.ensure_future, _notify(data))
+            except Exception:
+                pass
+
         return start_watching(
             project_dir=args["project_dir"],
             mods_dir=args["mods_dir"],
             mod_name=args.get("mod_name", ""),
             configuration=args.get("configuration", "Debug"),
+            game_dir=GAME_DIR,
+            auto_reload=args.get("auto_reload", True),
+            pool_registrations=args.get("pool_registrations"),
+            debounce_seconds=args.get("debounce_seconds", 1.5),
+            on_notification=_on_notification,
         )
 
     elif name == "stop_watching":
         from .file_watcher import stop_watching
-        return stop_watching()
+        return stop_watching(project_dir=args.get("project_dir"))
 
     elif name == "watcher_status":
         from .file_watcher import watcher_status
-        return watcher_status()
+        return watcher_status(project_dir=args.get("project_dir"))
 
     # ── Analysis ──
     elif name == "reverse_hook_lookup":
@@ -4432,6 +4750,97 @@ def _parse_args():
         help="HTTP server port (default: 8090)",
     )
     return parser.parse_args()
+
+
+# ── FMOD Audio Data ──────────────────────────────────────────────────────
+
+_fmod_data: dict | None = None
+
+def _load_fmod_data() -> dict:
+    """Load and cache the FMOD dump JSON."""
+    global _fmod_data
+    if _fmod_data is not None:
+        return _fmod_data
+
+    import json
+    # Try multiple locations
+    candidates = [
+        os.path.join(os.path.dirname(__file__), "..", "fmod_dump.json"),
+        os.path.join(os.environ.get("STS2_GAME_DIR", ""), "mods", "fmoddumper", "fmod_dump.json"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                _fmod_data = json.load(f)
+            return _fmod_data
+
+    return {"events": [], "buses": [], "banks": [], "global_parameters": []}
+
+
+def _list_game_audio(query: str, category: str = "events") -> list:
+    """Search FMOD events, buses, banks, or global parameters by substring."""
+    data = _load_fmod_data()
+    query_lower = query.lower()
+    results = []
+
+    def matches(item: dict, fields: list[str]) -> bool:
+        return any(query_lower in str(item.get(f, "")).lower() for f in fields)
+
+    if category in ("events", "all"):
+        for ev in data.get("events", []):
+            if matches(ev, ["path", "guid"]):
+                entry: dict = {"path": ev["path"], "guid": ev.get("guid", "")}
+                if ev.get("length_ms"):
+                    entry["length_ms"] = ev["length_ms"]
+                if ev.get("is_stream"):
+                    entry["is_stream"] = True
+                if ev.get("is_snapshot"):
+                    entry["is_snapshot"] = True
+                if ev.get("parameters"):
+                    entry["parameters"] = [
+                        {"name": p["name"], "min": p["minimum"], "max": p["maximum"],
+                         "default": p["default_value"]}
+                        for p in ev["parameters"]
+                    ]
+                results.append(entry)
+
+    if category in ("buses", "all"):
+        for bus in data.get("buses", []):
+            if matches(bus, ["path", "guid"]):
+                results.append({
+                    "type": "bus",
+                    "path": bus["path"],
+                    "guid": bus.get("guid", ""),
+                    "volume": bus.get("volume"),
+                })
+
+    if category in ("banks", "all"):
+        for bank in data.get("banks", []):
+            if matches(bank, ["path", "guid", "godot_res_path"]):
+                results.append({
+                    "type": "bank",
+                    "path": bank["path"],
+                    "guid": bank.get("guid", ""),
+                    "res_path": bank.get("godot_res_path", ""),
+                    "event_count": bank.get("event_count", 0),
+                })
+
+    if category in ("global_parameters", "all"):
+        for param in data.get("global_parameters", []):
+            if matches(param, ["name"]):
+                results.append({
+                    "type": "global_parameter",
+                    "name": param["name"],
+                    "min": param.get("minimum"),
+                    "max": param.get("maximum"),
+                    "default": param.get("default_value"),
+                })
+
+    import json as _json
+    summary = f"Found {len(results)} results for '{query}'"
+    if category != "all":
+        summary += f" in {category}"
+    return [types.TextContent(type="text", text=summary + "\n\n" + _json.dumps(results, indent=2))]
 
 
 async def main():

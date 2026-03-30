@@ -31,7 +31,7 @@ public sealed class MyPotion : CustomPotionModel { ... }
 ## Standard Overrides
 All `PotionModel` overrides still apply:
 - `Rarity` — PotionRarity.Common, Uncommon, Rare
-- `Usage` — PotionUsage.CombatOnly, OutOfCombat, Anywhere
+- `Usage` — PotionUsage.CombatOnly, AnyTime, Automatic
 - `TargetType` — None, AnyEnemy, AnyAlly, AnyPlayer, AllEnemies, AllAllies
 - `OnUse(PlayerChoiceContext, Creature?)` — main potion effect
 

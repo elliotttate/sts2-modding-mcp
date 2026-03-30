@@ -1,5 +1,9 @@
 mcp[cli]>=1.0.0
 
+# Optional — faster file watching (falls back to polling if not installed)
+# pip install watchdog
+# watchdog>=3.0
+
 # Optional — only needed for image generation tools (generate_art, process_art)
 # Uncomment or install separately:  pip install Pillow numpy rembg google-genai
 # google-genai>=1.0.0

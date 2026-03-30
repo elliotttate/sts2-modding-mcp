@@ -12,6 +12,9 @@ http = [
     "uvicorn>=0.24",
     "starlette>=0.38",
 ]
+watch = [
+    "watchdog>=3.0",
+]
 images = [
     "google-genai>=1.0.0",
     "Pillow>=10.0",

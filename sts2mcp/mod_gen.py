@@ -396,20 +396,21 @@ class ModGenerator:
         # Build dynamic vars
         dyn_vars = []
         if damage > 0:
-            dyn_vars.append(f"                new DamageVar({damage}M)")
+            dyn_vars.append(f"        new DamageVar({damage}m, ValueProp.Move)")
         if block > 0:
-            dyn_vars.append(f"                new BlockVar({block}M)")
+            dyn_vars.append(f"        new BlockVar({block}m, ValueProp.Move)")
         if magic_number > 0:
-            dyn_vars.append(f"                new MagicNumberVar({magic_number}M)")
+            dyn_vars.append(f"        new IntVar(\"MagicNumber\", {magic_number}m)")
         if not dyn_vars:
-            dyn_vars.append("                // Add DynamicVar entries here")
+            dyn_vars.append("        // Add DynamicVar entries here")
 
         # Build OnPlay body
         on_play_lines = []
         if damage > 0 and card_type == "Attack":
             on_play_lines.append(
                 "        await DamageCmd.Attack(DynamicVars.Damage.BaseValue)\n"
-                "            .FromCard(this, cardPlay)\n"
+                "            .FromCard(this)\n"
+                "            .Targeting(cardPlay.Target)\n"
                 "            .Execute(choiceContext);"
             )
         if block > 0:
@@ -417,8 +418,8 @@ class ModGenerator:
                 "        await CreatureCmd.GainBlock(\n"
                 "            Owner.Creature,\n"
                 "            DynamicVars.Block.BaseValue,\n"
-                "            ValueProp.Powered,\n"
-                "            this);"
+                "            ValueProp.Move,\n"
+                "            cardPlay);"
             )
         if not on_play_lines:
             on_play_lines.append("        // TODO: Implement card effect")
@@ -812,6 +813,7 @@ class ModGenerator:
                 body_lines.append(
                     f"        await DamageCmd.Attack({field_name})\n"
                     f"            .FromMonster(this)\n"
+                    f"            .Targeting(targets[0])\n"
                     f"            .Execute(null);"
                 )
             if move.get("block"):
@@ -1037,7 +1039,7 @@ class ModGenerator:
         build_pck_artifact: bool = False,
     ) -> dict:
         """Build a mod project and optionally build its PCK."""
-        result = build_project(project_dir, configuration=configuration)
+        result = build_project(project_dir, configuration=configuration, game_dir=self.game_dir)
         if build_pck_artifact and result.get("success"):
             result["pck"] = build_project_pck(project_dir)
             result["success"] = bool(result["success"]) and bool(result["pck"].get("success"))
@@ -1104,6 +1106,7 @@ class ModGenerator:
             mod_name=mod_name,
             configuration=configuration,
             build_pck_first=build_pck_artifact,
+            game_dir=self.game_dir,
         )
 
     def validate_project_localization(self, project_dir: str) -> dict:
@@ -1194,24 +1197,89 @@ class ModGenerator:
         class_name: str,
         starting_hp: int = 80,
         starting_gold: int = 99,
-        orb_slots: int = 0,
+        color: str = "0.5f, 0.5f, 0.5f",
+        gender: str = "Neutral",
+        attack_anim_delay: float = 0.15,
+        cast_anim_delay: float = 0.25,
+        card_hue: float = 0.5,
+        starter_cards: list[str] | None = None,
+        starter_relics: list[str] | None = None,
     ) -> dict:
-        """Generate a custom character class with pool models (requires BaseLib)."""
+        """Generate a custom character class with pool models (requires BaseLib).
+
+        Args:
+            color: C# Color constructor args, e.g. '0.5f, 0.0f, 0.5f' or '"ff6644"'
+            gender: CharacterGender enum value: Neutral, Masculine, Feminine
+            attack_anim_delay: Seconds to delay attack animation (default 0.15)
+            cast_anim_delay: Seconds to delay cast animation (default 0.25)
+            card_hue: HSV hue for card pool color (0-1, e.g. 0.75 = purple)
+            starter_cards: List of starter card class names (e.g. ['StrikeMyChar', 'DefendMyChar'])
+            starter_relics: List of starter relic class names (e.g. ['MyStarterRelic'])
+        """
         snake_name = to_snake_case(class_name)
+        mod = mod_name or mod_namespace
+
+        # Build starter deck block
+        if starter_cards:
+            card_lines = ",\n        ".join(
+                f"ModelDb.Card<{c}>()" for c in starter_cards
+            )
+            starter_deck_block = (
+                f"public override IEnumerable<CardModel> StartingDeck =>\n"
+                f"    [\n        {card_lines}\n    ];"
+            )
+        else:
+            starter_deck_block = (
+                "public override IEnumerable<CardModel> StartingDeck =>\n"
+                "    [\n"
+                "        // TODO: Add starter cards, e.g.:\n"
+                f"        // ModelDb.Card<Strike{class_name}>(),\n"
+                f"        // ModelDb.Card<Defend{class_name}>(),\n"
+                "    ];"
+            )
+
+        # Build starter relics block
+        if starter_relics:
+            relic_lines = ",\n        ".join(
+                f"ModelDb.Relic<{r}>()" for r in starter_relics
+            )
+            starter_relics_block = (
+                f"public override IReadOnlyList<RelicModel> StartingRelics =>\n"
+                f"    [\n        {relic_lines}\n    ];"
+            )
+        else:
+            starter_relics_block = (
+                "public override IReadOnlyList<RelicModel> StartingRelics =>\n"
+                "    [\n"
+                f"        // TODO: Add starter relic, e.g.: ModelDb.Relic<MyStarterRelic>()\n"
+                "    ];"
+            )
+
         source = _load_template("character_template").format(
             namespace=mod_namespace,
-            mod_name=mod_name or mod_namespace,
+            mod_name=mod,
             class_name=class_name,
             snake_name=snake_name,
             starting_hp=starting_hp,
             starting_gold=starting_gold,
-            orb_slots=orb_slots,
+            color_literal=color,
+            gender=gender,
+            attack_anim_delay=attack_anim_delay,
+            cast_anim_delay=cast_anim_delay,
+            card_hue=card_hue,
+            starter_deck_block=starter_deck_block,
+            starter_relics_block=starter_relics_block,
         )
 
-        model_id = to_screaming_snake(class_name)
         loc = {
-            f"{model_id}.name": class_name.replace("_", " "),
-            f"{model_id}.description": f"TODO: {class_name} description",
+            f"{snake_name}.title": class_name,
+            f"{snake_name}.titleObject": f"the {class_name}",
+            f"{snake_name}.pronounSubject": "they",
+            f"{snake_name}.pronounObject": "them",
+            f"{snake_name}.possessiveAdjective": "their",
+            f"{snake_name}.pronounPossessive": "theirs",
+            f"{class_name.upper()}.title": class_name.upper(),
+            f"{class_name.upper()}.description": f"A new character joins the Spire.",
         }
 
         return {
@@ -1221,10 +1289,13 @@ class ModGenerator:
             "localization": {"characters.json": loc},
             "notes": [
                 "Requires BaseLib (Alchyr.Sts2.BaseLib NuGet package)",
-                f"Create visual assets at {mod_name}/Characters/{class_name}/",
-                "Need: character .tscn scene, select_bg.png, energy_counter.tscn",
-                "Cards use [Pool(typeof({0}CardPool))] attribute".format(class_name),
-                "Relics use [Pool(typeof({0}RelicPool))] attribute".format(class_name),
+                f"Create visual assets: use scaffold_character_assets tool to generate scene files and image checklist",
+                f"Cards use [Pool(typeof({class_name}CardPool))] attribute",
+                f"Relics use [Pool(typeof({class_name}RelicPool))] attribute",
+                f"Potions use [Pool(typeof({class_name}PotionPool))] attribute",
+                "Energy counter needs 5 layer PNGs (orb_layer_0 through orb_layer_4) or use a scene",
+                "Card pool needs energy icon PNGs (big and text variants)",
+                f"See get_modding_guide topic 'custom_characters' for full walkthrough",
             ],
         }
 

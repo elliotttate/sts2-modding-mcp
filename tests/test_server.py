@@ -45,6 +45,7 @@ class TestToolRegistration:
         expected = {
             "build_mod", "install_mod", "uninstall_mod",
             "list_installed_mods", "launch_game", "decompile_game",
+            "hot_reload_project",
         }
         assert expected.issubset(self.tool_names)
 
@@ -191,3 +192,9 @@ class TestModuleImports:
         assert callable(bridge_client.shop_action)
         assert callable(bridge_client.get_card_piles)
         assert callable(bridge_client.manipulate_state)
+
+    def test_import_hot_reload_helpers(self):
+        from sts2mcp.hot_reload import build_deploy_and_hot_reload_project, discover_pool_registrations
+
+        assert callable(build_deploy_and_hot_reload_project)
+        assert callable(discover_pool_registrations)

@@ -12,14 +12,23 @@ public class MyChar : CustomCharacterModel
     public override Color NameColor => Color;
     public override CharacterGender Gender => CharacterGender.Neutral;
     public override int StartingHp => 70;
+    public override int StartingGold => 99;
 
     public override IEnumerable<CardModel> StartingDeck => [
-        ModelDb.Card<StrikeIronclad>(),
-        ModelDb.Card<DefendIronclad>(),
+        ModelDb.Card<StrikeMyChar>(),
+        ModelDb.Card<StrikeMyChar>(),
+        ModelDb.Card<StrikeMyChar>(),
+        ModelDb.Card<StrikeMyChar>(),
+        ModelDb.Card<DefendMyChar>(),
+        ModelDb.Card<DefendMyChar>(),
+        ModelDb.Card<DefendMyChar>(),
+        ModelDb.Card<DefendMyChar>(),
+        ModelDb.Card<SpecialStarter1>(),
+        ModelDb.Card<SpecialStarter2>(),
     ];
 
     public override IReadOnlyList<RelicModel> StartingRelics => [
-        ModelDb.Relic<BurningBlood>(),
+        ModelDb.Relic<MyStarterRelic>(),
     ];
 
     public override CardPoolModel CardPool => ModelDb.CardPool<MyCharCardPool>();
@@ -28,71 +37,149 @@ public class MyChar : CustomCharacterModel
 }
 ```
 
-## Visual Assets
-- `CustomVisualPath` — Path to creature_visuals `.tscn` scene
-- `CreateCustomVisuals()` — Method to create `NCreatureVisuals` from scene
-- `CustomTrailPath` — Trail effect path
-- `CustomIconTexturePath` — Character icon texture
-- `CustomIconPath` — Character icon path
+## Required Overrides
 
-## Character Select UI
-- `CustomCharacterSelectBg` — Select screen background
-- `CustomCharacterSelectIconPath` — Character select icon
-- `CustomCharacterSelectLockedIconPath` — Locked state icon
-- `CustomCharacterSelectTransitionPath` — Transition scene
-- `CustomMapMarkerPath` — Map marker icon
+| Property | Type | Description |
+|----------|------|-------------|
+| `NameColor` | `Color` | Character name color in UI |
+| `Gender` | `CharacterGender` | `Neutral`, `Masculine`, or `Feminine` — affects combat pronouns |
+| `StartingHp` | `int` | Starting maximum HP |
+| `StartingDeck` | `IEnumerable<CardModel>` | Starting deck (typically 10 cards) |
+| `StartingRelics` | `IReadOnlyList<RelicModel>` | Starting relics (typically 1) |
+| `CardPool` | `CardPoolModel` | Card pool via `ModelDb.CardPool<T>()` |
+| `RelicPool` | `RelicPoolModel` | Relic pool via `ModelDb.RelicPool<T>()` |
+| `PotionPool` | `PotionPoolModel` | Potion pool via `ModelDb.PotionPool<T>()` |
+
+## Visual Paths
+
+### Combat & Character Display
+- `CustomVisualPath` — Path to creature_visuals `.tscn` scene (NCreatureVisuals)
+- `CreateCustomVisuals()` — Alternative: method to create `NCreatureVisuals` programmatically
+- `CustomTrailPath` — Card play trail particle effect `.tscn`
+- `CustomIconPath` — Character icon `.tscn` scene
+- `CustomIconTexturePath` — Character icon `.png` texture (top panel, ~64x64)
+- `CustomRestSiteAnimPath` — Rest site character display `.tscn`
+- `CustomMerchantAnimPath` — Merchant character display `.tscn`
+
+### Character Select UI
+- `CustomCharacterSelectBg` — Select screen background `.tscn`
+- `CustomCharacterSelectIconPath` — Character select portrait `.png`
+- `CustomCharacterSelectLockedIconPath` — Locked state portrait `.png`
+- `CustomCharacterSelectTransitionPath` — Transition material `.tres`
+- `CustomMapMarkerPath` — Map marker icon `.png`
+- `CharacterSelectSfx` — Sound on character select `.ogg`
+
+### Multiplayer (Rock-Paper-Scissors)
+- `CustomArmPointingTexturePath` — Pointing hand gesture `.png`
+- `CustomArmRockTexturePath` — Rock gesture `.png`
+- `CustomArmPaperTexturePath` — Paper gesture `.png`
+- `CustomArmScissorsTexturePath` — Scissors gesture `.png`
+
+## Color & Theming
+
+```csharp
+public static readonly Color Color = new(0.5f, 0.0f, 0.5f);  // Purple
+public override Color NameColor => Color;           // Character name in UI
+public override Color MapDrawingColor => Color;     // Map path drawing color
+```
 
 ## Animation
-- `SetupCustomAnimationStates(MegaSprite)` — Override for custom spine animations
-- `SetupAnimationState()` — Static helper for standard animation state machine setup
+
+```csharp
+// Override for custom Spine/MegaSprite animations:
+public override CreatureAnimator? SetupCustomAnimationStates(MegaSprite controller)
+{
+    return SetupAnimationState(controller, "Idle", hitName: "Hit");
+}
+
+// Animation timing:
+public override float AttackAnimDelay => 0.15f;  // Seconds before attack VFX
+public override float CastAnimDelay => 0.25f;    // Seconds before cast VFX
+```
+
+`SetupAnimationState()` is a static helper that creates a standard state machine with idle and hit states.
 
 ## Audio
-- `CustomAttackSfx` — Attack sound effect
-- `CustomCastSfx` — Cast/skill sound effect
-- `CustomDeathSfx` — Death sound effect
+- `CustomAttackSfx` — Attack sound effect path
+- `CustomCastSfx` — Cast/skill sound effect path
+- `CustomDeathSfx` — Death sound effect path
 
 ## Energy Counter
+
+### Option A: Programmatic (recommended)
 ```csharp
-// Custom energy counter with layer images and colors:
 public override CustomEnergyCounter? CustomEnergyCounter => new CustomEnergyCounter(
-    layerPathFunc: (index) => $"res://MyMod/images/charui/energy_layer_{index}.png",
-    colors: new[] { Color, Color.Darkened(0.3f) }
+    layerPathFunc: i => $"res://MyMod/images/energy/orb_layer_{i}.png",
+    Color,                    // Primary glow color
+    Color.Lightened(0.3f)     // Secondary glow color
 );
-// Or use a scene path:
+```
+
+The `CustomEnergyCounter` constructor:
+- `Func<int, string> layerPathFunc` — Returns PNG path for layer index (0-4, 5 layers)
+- `Color color1` — Primary energy orb glow color
+- `Color color2` — Secondary energy orb glow color
+
+### Option B: Scene-based
+```csharp
 public override string? CustomEnergyCounterPath => "res://MyMod/scenes/energy_counter.tscn";
 ```
 
-## Rock-Paper-Scissors (Multiplayer)
-- `CustomArmPointingTexturePath`
-- `CustomArmRockTexturePath`
-- `CustomArmPaperTexturePath`
-- `CustomArmScissorsTexturePath`
+## Extra Asset Preloading
+
+Preload VFX textures, stance auras, or other assets at game startup:
+
+```csharp
+protected override IEnumerable<string> ExtraAssetPaths => [
+    "res://MyMod/vfx/aura.tscn",
+    "res://MyMod/images/vfx/particle.png",
+    .. ModelDb.Power<MyPower>().AssetPaths,  // Spread operator for power assets
+];
+```
+
+## Architect Attack VFX
+
+```csharp
+public override List<string> GetArchitectAttackVfx() => [
+    "vfx/vfx_attack_blunt", "vfx/vfx_heavy_blunt", "vfx/vfx_attack_slash",
+    "vfx/vfx_bloody_impact", "vfx/vfx_rock_shatter"
+];
+```
 
 ## Misc Overrides
-- `CustomRestSiteAnimPath` — Rest site animation
-- `CustomMerchantAnimPath` — Merchant animation
 - `StartingGold` — Default 99
+- `UnlocksAfterRunAs` — Character required to unlock this one (null = always unlocked)
 
 ## Pool Models (Create Alongside Character)
 
 ### CustomCardPoolModel
 ```csharp
-public class MyCharCardPool : CustomCardPoolModel
+public sealed class MyCharCardPool : CustomCardPoolModel
 {
     public override string Title => MyChar.CharacterId;
-    public override float H => 1f;   // Hue shift
-    public override float S => 1f;   // Saturation
-    public override float V => 1f;   // Value/brightness
-    public override Color DeckEntryCardColor => new("ff6644");
+    public override float H => 0.08f;  // Hue (0-1): 0=red, 0.33=green, 0.66=blue, 0.75=purple
+    public override float S => 1f;     // Saturation (0-1)
+    public override float V => 1f;     // Value/brightness (0-1)
+    public override Color DeckEntryCardColor => MyChar.Color;
     public override bool IsColorless => false;
     public override bool IsShared => false;  // true = shared pool (all characters)
+
+    // Custom energy icons on card cost display
+    public override string? BigEnergyIconPath => "res://MyMod/images/ui/energy_icon.png";
+    public override string? TextEnergyIconPath => "res://MyMod/images/ui/text_energy_icon.png";
 }
 ```
 
 ### CustomRelicPoolModel / CustomPotionPoolModel
-Similar structure. Set `IsShared = true` to register as a shared pool.
+```csharp
+public class MyCharRelicPool : CustomRelicPoolModel
+{
+    public override string EnergyColorName => MyChar.CharacterId;
+    public override Color LabOutlineColor => MyChar.Color;
+}
+```
 
-All pool models support `BigEnergyIconPath`, `TextEnergyIconPath`, and `EnergyColorName` for custom energy icons.
+All pool models support `BigEnergyIconPath`, `TextEnergyIconPath`, and `EnergyColorName` for custom energy icons. Set `IsShared = true` to register as a shared pool accessible to all characters.
 
 ## PlaceholderCharacterModel
 The NuGet character template starts with `PlaceholderCharacterModel` for staged development, providing sensible defaults while you build out the character.

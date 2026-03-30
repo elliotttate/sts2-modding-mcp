@@ -12,13 +12,79 @@ The MCP provides three levels of automated testing, from broad to precise:
 Use all three together: AutoSlay catches crashes, test scenarios verify behavior,
 bridge actions let you explore edge cases interactively.
 
-## Quick Manual Testing
-For fast iteration during development:
+## Hot Reload (Live Code Reload)
+For the full hot reload reference — bridge protocol, non-MCP usage, Python/shell
+examples, and technical internals — see `get_modding_guide("hot_reload")`.
+
+Three tiers of hot reload, from lightweight to comprehensive:
+
+| Tier | Tool | What Reloads |
+|------|------|-------------|
+| **1** | `bridge_hot_reload(dll, tier=1)` | Harmony patches only |
+| **2** | `bridge_hot_reload(dll, tier=2)` | Patches + entity models (cards/relics/powers) + localization |
+| **3** | `bridge_hot_reload(dll, tier=3, pck_path=...)` | Tier 2 + PCK resources (scenes, textures) |
+
+### Quick Manual Testing
+For fast iteration during development, use the project-aware workflow:
 
 1. `build_mod` — Compile your mod
 2. `install_mod` — Copy to game mods folder
-3. `bridge_hot_swap_patches` — Reload Harmony patches without restarting the game
+3. `bridge_hot_reload` — Reload everything without restarting the game
 4. Test via console or bridge actions
+
+Or use the one-shot helper:
+
+```
+hot_reload_project(
+    project_dir="E:/mods/MyMod",
+    mods_dir="E:/SteamLibrary/.../mods",
+)
+```
+
+`hot_reload_project` rebuilds, deploys, finds the deployed DLL/PCK automatically, and lets the bridge auto-discover pool registrations from the compiled assembly when you do not supply them explicitly. Set `auto_detect_pools=False` to disable that behavior.
+
+### Automatic Watch + Reload
+The fastest workflow — save a file and it's live in the game within seconds:
+
+```
+watch_project(
+    project_dir="E:/mods/MyMod",
+    mods_dir="E:/SteamLibrary/.../mods",
+    auto_reload=True,
+)
+```
+
+The watcher auto-detects the reload tier from changed files:
+- `.cs` files in `Patches/` → tier 1
+- Other `.cs` files or localization JSON → tier 2
+- Resource/data files (`.tscn`, `.tres`, `.png`, audio, scripts, non-localization JSON, etc.) → tier 3
+
+If `pool_registrations` is omitted, the watcher lets the bridge auto-discover pools from the compiled assembly. Pass explicit `pool_registrations` to override that for the entire watcher session.
+
+### What Each Tier Reloads
+**Tier 1** unpatches all Harmony patches and re-applies them from the new DLL.
+
+**Tier 2** does everything in tier 1, plus:
+- Updates the mod assembly reference in ModManager
+- Invalidates the type reflection cache so new types are discovered
+- Removes old entity types from ModelDb and injects new ones
+- Clears all cached entity enumerables (AllCards, AllRelics, etc.)
+- Unfreezes pool registrations and re-registers entities into pools
+- Reloads all localization tables and triggers UI text refresh
+
+**Tier 3** does everything in tier 2, plus remounts the PCK file so updated
+scenes, textures, and other Godot resources take effect.
+
+### Localization-Only Reload
+If you only changed localization JSON files and don't need a rebuild:
+```
+bridge_reload_localization()
+```
+
+### Known Limitations
+- **Memory**: Old assembly versions accumulate in memory (cannot be unloaded). Restart the game periodically during long dev sessions.
+- **Existing instances**: Cards/relics already instantiated in the current run still reference old types. Changes appear in the next run or encounter.
+- **Pool discovery**: Automatic `[Pool(typeof(...))]` discovery covers the common case. If your mod registers pools dynamically in code, pass explicit `pool_registrations`.
 
 ## AutoSlay (Automated Full Runs)
 Run entire games automatically. See the [AutoSlay guide](autoslay.md) for full details.
@@ -204,7 +270,7 @@ public class TestMyRelicCmd : AbstractConsoleCmd
 - `relic add` skips `AfterObtained()` — use `RelicCmd.Obtain(relic.ToMutable(), player)` instead
 
 ## Recommended Test Workflow
-1. **During development**: Bridge actions + hot swap for fast iteration
+1. **During development**: `watch_project` with `auto_reload=True` for save-and-see iteration
 2. **Before release**: AutoSlay smoke test (5+ runs per character)
 3. **Regression suite**: Test scenarios with fixed seeds for deterministic verification
 4. **After changes**: Re-run AutoSlay + test scenarios to catch regressions

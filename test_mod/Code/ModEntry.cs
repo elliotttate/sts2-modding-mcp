@@ -1,7 +1,9 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Text;
 using System.Threading;
 using Godot;
@@ -38,6 +40,21 @@ public static class ModEntry
             ExceptionMonitor.Initialize();
             GameLogCapture.Initialize();
             EventTracker.Record("mod_init", "MCPTest initializing");
+
+            // Register assembly version redirect early so hot-reloaded mods can
+            // resolve dependencies with mismatched versions (e.g., mod built against
+            // BaseLib 0.2.1.0 but game has BaseLib 0.1.0.0).
+            // Use BOTH AppDomain.AssemblyResolve (fires for version mismatches in
+            // the default ALC) and ALC.Resolving (fires for missing assemblies).
+            AppDomain.CurrentDomain.AssemblyResolve += (sender, args) =>
+            {
+                var requestedName = new System.Reflection.AssemblyName(args.Name);
+                return AppDomain.CurrentDomain.GetAssemblies()
+                    .FirstOrDefault(a => a.GetName().Name == requestedName.Name);
+            };
+            System.Runtime.Loader.AssemblyLoadContext.Default.Resolving += (ctx, name) =>
+                AppDomain.CurrentDomain.GetAssemblies()
+                    .FirstOrDefault(a => a.GetName().Name == name.Name);
 
             // Register all custom relics
             try

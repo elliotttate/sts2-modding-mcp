@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
@@ -12,8 +13,11 @@ using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.Relics;
+using MegaCrit.Sts2.Core.Helpers;
+using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Modding;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Saves;
 using MegaCrit.Sts2.Core.Entities.Merchant;
@@ -34,14 +38,40 @@ using MegaCrit.Sts2.Core.Nodes.Screens.MainMenu;
 using MegaCrit.Sts2.Core.Nodes.Combat;
 using MegaCrit.Sts2.Core.Nodes.Cards.Holders;
 using MegaCrit.Sts2.Core.Nodes.Rewards;
+using MegaCrit.Sts2.Core.Nodes.Potions;
 using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
 using Godot;
 using GodotEngine = Godot.Engine;
+using System.Security.Cryptography;
 
 namespace MCPTest;
 
 public static class BridgeHandler
 {
+    private sealed class HotReloadSession
+    {
+        public string ModKey { get; }
+        public AssemblyLoadContext? LoadContext { get; set; }
+        public Assembly? LastLoadedAssembly { get; set; }
+        public Harmony? HotReloadHarmony { get; set; }
+
+        public HotReloadSession(string modKey)
+        {
+            ModKey = modKey;
+        }
+    }
+
+    private sealed class SerializationCacheSnapshot
+    {
+        public Type? CacheType { get; init; }
+        public Dictionary<string, int>? CategoryMap { get; init; }
+        public List<string>? CategoryList { get; init; }
+        public Dictionary<string, int>? EntryMap { get; init; }
+        public List<string>? EntryList { get; init; }
+        public int? CategoryBitSize { get; init; }
+        public int? EntryBitSize { get; init; }
+    }
+
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         WriteIndented = false,
@@ -56,6 +86,59 @@ public static class BridgeHandler
     private static Dictionary<string, object?>? _previousState;
     private static readonly Dictionary<string, Dictionary<string, object?>> _snapshots = new();
     private static Dictionary<string, object?>? _lastRunFixtureParams;
+    private static readonly object _hotReloadLock = new();
+    private static readonly Dictionary<string, HotReloadSession> _hotReloadSessions = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly List<object> _reloadHistory = new();
+    private static bool _defaultAlcResolvingRegistered;
+    private static string _activeHotReloadModKey = "";
+    private static string _hotReloadProgress = "";
+    private const int MaxReloadHistory = 20;
+    private static readonly Regex HotReloadAssemblySuffixRegex = new(@"_hr\d{6,8}$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static string NormalizeHotReloadModKey(string? assemblyNameOrPath)
+    {
+        if (string.IsNullOrWhiteSpace(assemblyNameOrPath))
+            return "";
+        var fileOrAssemblyName = Path.GetFileNameWithoutExtension(assemblyNameOrPath);
+        return HotReloadAssemblySuffixRegex.Replace(fileOrAssemblyName, "");
+    }
+
+    private static HotReloadSession GetOrCreateHotReloadSession(string modKey)
+    {
+        lock (_hotReloadSessions)
+        {
+            if (!_hotReloadSessions.TryGetValue(modKey, out var session))
+            {
+                session = new HotReloadSession(modKey);
+                _hotReloadSessions[modKey] = session;
+            }
+            return session;
+        }
+    }
+
+    private static IEnumerable<Assembly> GetAssembliesForHotReloadMod(string modKey, Assembly? exclude = null)
+    {
+        return AppDomain.CurrentDomain.GetAssemblies()
+            .Where(a =>
+                !string.IsNullOrEmpty(a.GetName().Name)
+                && string.Equals(NormalizeHotReloadModKey(a.GetName().Name), modKey, StringComparison.OrdinalIgnoreCase)
+                && a != exclude);
+    }
+
+    private static void SetHotReloadProgress(string modKey, string step)
+    {
+        _activeHotReloadModKey = modKey;
+        _hotReloadProgress = step;
+    }
+
+    private static void ClearHotReloadProgress(string modKey)
+    {
+        if (string.IsNullOrEmpty(modKey) || string.Equals(_activeHotReloadModKey, modKey, StringComparison.OrdinalIgnoreCase))
+        {
+            _activeHotReloadModKey = "";
+            _hotReloadProgress = "";
+        }
+    }
 
     public static string HandleRequest(string requestJson)
     {
@@ -98,6 +181,11 @@ public static class BridgeHandler
                 "get_card_piles" => MainThreadDispatcher.Invoke(() => GetCardPiles()),
                 "manipulate_state" => MainThreadDispatcher.Invoke(() => ManipulateState(root)),
                 "hot_swap_patches" => MainThreadDispatcher.Invoke(() => HotSwapPatches(root)),
+                "hot_reload" => MainThreadDispatcher.Invoke(() => HotReload(root)),
+                "reload_localization" => MainThreadDispatcher.Invoke(() => ReloadLocalization()),
+                "reload_history" => GetReloadHistory(),
+                "hot_reload_progress" => new { step = _hotReloadProgress, in_progress = !string.IsNullOrEmpty(_hotReloadProgress), mod_key = _activeHotReloadModKey },
+                "refresh_live_instances" => MainThreadDispatcher.Invoke(() => RefreshLiveInstances()),
                 "get_exceptions" => GetExceptions(root),
                 "get_state_diff" => MainThreadDispatcher.Invoke(() => GetStateDiff()),
                 "capture_screenshot" => MainThreadDispatcher.Invoke(() => CaptureScreenshot(root)),
@@ -133,6 +221,7 @@ public static class BridgeHandler
                 "start_foil_tilt" => MainThreadDispatcher.Invoke(() => StartFoilTilt()),
                 "stop_foil_tilt" => MainThreadDispatcher.Invoke(() => StopFoilTilt()),
                 "click_node" => MainThreadDispatcher.Invoke(() => ClickNode(root)),
+                "fmod_test" => MainThreadDispatcher.Invoke(() => FmodTest(root)),
                 _ => new { error = $"Unknown method: {method}" },
             };
 
@@ -878,6 +967,12 @@ public static class BridgeHandler
             var acts = ModelDb.Acts.ToList();
             var emptyModifiers = new List<ModifierModel>();
 
+            // Resolve GameMode enum for the new StartNewSingleplayerRun signature
+            var gameModeType = Type.GetType("MegaCrit.Sts2.Core.Runs.GameMode, sts2");
+            object gameMode = gameModeType != null
+                ? Enum.Parse(gameModeType, "Standard")
+                : (object)1; // fallback: GameMode.Standard = 1
+
             // Dispatch to main thread
             var nGameType = Type.GetType("MegaCrit.Sts2.Core.Nodes.NGame, sts2");
             var instanceProp = nGameType?.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static);
@@ -885,6 +980,7 @@ public static class BridgeHandler
 
             if (nGameType == null || instanceProp == null || startMethod == null)
                 return new { error = "NGame API not found" };
+
 
             // Dispatch to main thread synchronously so run initiation completes before we respond
             string? dispatchError = null;
@@ -899,7 +995,7 @@ public static class BridgeHandler
                         charModel, true,
                         (IReadOnlyList<ActModel>)acts,
                         (IReadOnlyList<ModifierModel>)emptyModifiers,
-                        seed, ascension, null
+                        seed, gameMode, ascension, null
                     });
                     if (task is System.Threading.Tasks.Task t)
                     {
@@ -3035,6 +3131,2027 @@ public static class BridgeHandler
         }
     }
 
+    // ─── Hot Reload (Full Entity + Patch + Loc + PCK) ─────────────────────
+
+    private static object HotReload(JsonElement root)
+    {
+        if (!Monitor.TryEnter(_hotReloadLock))
+            return new { error = "Hot reload already in progress. Wait for the current reload to finish." };
+
+        string modKey = "";
+        try
+        {
+            if (root.TryGetProperty("params", out var p)
+                && p.TryGetProperty("dll_path", out var dp))
+            {
+                modKey = NormalizeHotReloadModKey(dp.GetString());
+                if (!string.IsNullOrEmpty(modKey))
+                    SetHotReloadProgress(modKey, "starting");
+            }
+            return HotReloadInner(root, modKey);
+        }
+        finally
+        {
+            ClearHotReloadProgress(modKey);
+            Monitor.Exit(_hotReloadLock);
+        }
+    }
+
+    private static object HotReloadInner(JsonElement root, string requestedModKey)
+    {
+        var actions = new List<string>();
+        var errors = new List<string>();
+        var warnings = new List<string>();
+        var changedEntities = new List<object>();
+        int entitiesRemoved = 0, entitiesInjected = 0, poolsUnfrozen = 0, poolRegs = 0, patchCount = 0;
+        int entitiesSkipped = 0;
+        int verified = 0, verifyFailed = 0;
+        int mutableOk = 0, mutableFailed = 0;
+        int liveRefreshed = 0;
+        bool locReloaded = false;
+        bool pckReloaded = false;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var stepTimings = new Dictionary<string, long>();
+        long lastLap = 0;
+
+        // Parse params
+        string? dllPath = null;
+        string? pckPath = null;
+        int tier = 2;
+        JsonElement poolRegistrations = default;
+        bool hasPoolRegs = false;
+        string modKey = requestedModKey;
+        Assembly? assembly = null;
+        string? assemblyName = null;
+        int depsLoaded = 0;
+        bool alcCollectible = false;
+        HotReloadSession? session = null;
+        AssemblyLoadContext? priorLoadContext = null;
+        Harmony? priorHotReloadHarmony = null;
+        AssemblyLoadContext? stagedLoadContext = null;
+        Harmony? stagedHotReloadHarmony = null;
+        bool sessionCommitted = false;
+        SerializationCacheSnapshot? serializationSnapshot = null;
+        List<Type> newModelTypes = [];
+        var previousModAssemblyRefs = new List<(object mod, FieldInfo assemblyField, Assembly previousAssembly)>();
+
+        void CleanupStagedHotReloadArtifacts()
+        {
+            if (sessionCommitted)
+                return;
+
+            if (stagedHotReloadHarmony != null)
+            {
+                try
+                {
+                    stagedHotReloadHarmony.UnpatchAll(stagedHotReloadHarmony.Id);
+                    actions.Add("staged_harmony_unpatched");
+                }
+                catch (Exception cleanupEx)
+                {
+                    warnings.Add($"staged_harmony_cleanup: {cleanupEx.Message}");
+                }
+                stagedHotReloadHarmony = null;
+            }
+
+            if (stagedLoadContext != null)
+            {
+                UnloadCollectibleLoadContext(stagedLoadContext, warnings, "staged_alc_cleanup");
+                stagedLoadContext = null;
+            }
+        }
+
+        object Finish()
+        {
+            var result = new
+            {
+                success = errors.Count == 0,
+                tier,
+                assembly_name = assemblyName,
+                patch_count = patchCount,
+                entities_removed = entitiesRemoved,
+                entities_injected = entitiesInjected,
+                pools_unfrozen = poolsUnfrozen,
+                pool_registrations_applied = poolRegs,
+                localization_reloaded = locReloaded,
+                pck_reloaded = pckReloaded,
+                live_instances_refreshed = liveRefreshed,
+                mutable_check_passed = mutableOk,
+                mutable_check_failed = mutableFailed,
+                alc_collectible = alcCollectible,
+                total_ms = sw.ElapsedMilliseconds,
+                step_timings = stepTimings,
+                timestamp = DateTime.UtcNow.ToString("o"),
+                changed_entities = changedEntities,
+                actions,
+                errors,
+                warnings,
+            };
+
+            lock (_reloadHistory)
+            {
+                _reloadHistory.Add(result);
+                while (_reloadHistory.Count > MaxReloadHistory)
+                    _reloadHistory.RemoveAt(0);
+            }
+
+            ModEntry.WriteLog($"[HotReload] {(errors.Count == 0 ? "Complete" : "Failed")} — actions: {actions.Count}, errors: {errors.Count}, verified: {verified}, live_refreshed: {liveRefreshed}");
+            EventTracker.Record("hot_reload", $"Tier {tier} {(errors.Count == 0 ? "complete" : "failed")}: {entitiesInjected} entities, {patchCount} patches, {errors.Count} errors, {verified} verified, {liveRefreshed} live");
+            return result;
+        }
+
+        if (root.TryGetProperty("params", out var p))
+        {
+            if (p.TryGetProperty("dll_path", out var dp)) dllPath = dp.GetString();
+            if (p.TryGetProperty("pck_path", out var pp)) pckPath = pp.GetString();
+            if (p.TryGetProperty("tier", out var tp)) tier = tp.GetInt32();
+            if (p.TryGetProperty("pool_registrations", out poolRegistrations) && poolRegistrations.ValueKind == JsonValueKind.Array)
+                hasPoolRegs = true;
+        }
+
+        if (string.IsNullOrWhiteSpace(dllPath) || !File.Exists(dllPath))
+        {
+            errors.Add($"dll_not_found: {dllPath}");
+            return Finish();
+        }
+
+        tier = Math.Clamp(tier, 1, 3);
+        modKey = string.IsNullOrEmpty(modKey) ? NormalizeHotReloadModKey(dllPath) : modKey;
+        session = GetOrCreateHotReloadSession(modKey);
+        priorLoadContext = session.LoadContext;
+        priorHotReloadHarmony = session.HotReloadHarmony;
+        ModEntry.WriteLog($"[HotReload] Starting tier {tier} reload from {dllPath}");
+        EventTracker.Record("hot_reload", $"Tier {tier} from {dllPath} ({modKey})");
+
+        // ── Step 1: Load assembly via collectible ALC + dependency DLLs ──
+        SetHotReloadProgress(modKey, "loading_assembly");
+        try
+        {
+            var modDir = Path.GetDirectoryName(dllPath)!;
+            var mainDllName = Path.GetFileNameWithoutExtension(dllPath);
+            string[] sharedDlls = { "GodotSharp", "0Harmony", "sts2" };
+
+            // Load dependency DLLs into default context (shared types must live here)
+            // If a dep DLL file is newer than the loaded version, load it into a
+            // fresh collectible ALC so the new main assembly can pick it up.
+            foreach (var depDll in Directory.GetFiles(modDir, "*.dll"))
+            {
+                var depName = Path.GetFileNameWithoutExtension(depDll);
+                if (sharedDlls.Any(s => string.Equals(s, depName, StringComparison.OrdinalIgnoreCase))
+                    || string.Equals(depName, mainDllName, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(NormalizeHotReloadModKey(depName), modKey, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                var existing = AppDomain.CurrentDomain.GetAssemblies()
+                    .FirstOrDefault(a => a.GetName().Name == depName);
+                if (existing == null)
+                {
+                    try
+                    {
+                        AssemblyLoadContext.Default.LoadFromAssemblyPath(Path.GetFullPath(depDll));
+                        depsLoaded++;
+                        ModEntry.WriteLog($"[HotReload] Loaded dependency: {depName}");
+                    }
+                    catch (Exception depEx)
+                    {
+                        warnings.Add($"dep_load_{depName}: {depEx.Message}");
+                    }
+                }
+                else
+                {
+                    // Check if the on-disk DLL is newer (different version) than what's loaded
+                    try
+                    {
+                        var onDiskVersion = AssemblyName.GetAssemblyName(Path.GetFullPath(depDll)).Version;
+                        var loadedVersion = existing.GetName().Version;
+                        if (onDiskVersion != null && loadedVersion != null && onDiskVersion != loadedVersion)
+                        {
+                            warnings.Add($"dep_stale_{depName}: loaded={loadedVersion}, on_disk={onDiskVersion}. " +
+                                "Dependency DLL changes require a game restart to take effect.");
+                            ModEntry.WriteLog($"[HotReload] Stale dependency: {depName} loaded={loadedVersion} on_disk={onDiskVersion}");
+                        }
+                    }
+                    catch { /* version check is best-effort */ }
+                }
+            }
+
+            // Use default ALC for entity-bearing mods (tier 2+) because cross-ALC
+            // type identity breaks ModelDb.Inject, entity cloning, and runtime casts.
+            // The caller stamps a unique assembly name (e.g., MyMod_hr14523045) so
+            // the default ALC accepts it even if a previous version is loaded.
+            // Use collectible ALC only for tier 1 (patch-only) where type identity
+            // doesn't matter and memory reclaim is beneficial.
+            if (tier <= 1)
+            {
+                try
+                {
+                    var alc = new AssemblyLoadContext($"HotReload-{DateTime.Now.Ticks}", isCollectible: true);
+                    alc.Resolving += (ctx, name) =>
+                    {
+                        return AppDomain.CurrentDomain.GetAssemblies()
+                            .FirstOrDefault(a => a.GetName().Name == name.Name);
+                    };
+                    assembly = alc.LoadFromAssemblyPath(dllPath);
+                    stagedLoadContext = alc;
+                    alcCollectible = true;
+                    ModEntry.WriteLog($"[HotReload] Loaded assembly into collectible ALC: {assembly.FullName}");
+                }
+                catch (Exception alcEx)
+                {
+                    warnings.Add($"collectible_alc_fallback: {alcEx.Message}");
+                    assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(dllPath);
+                    ModEntry.WriteLog($"[HotReload] Fallback to default ALC: {assembly.FullName}");
+                }
+            }
+            else
+            {
+                // Tier 2+: default ALC for full type compatibility.
+                // Register a Resolving handler to redirect version-mismatched
+                // dependencies to already-loaded assemblies (e.g., mod references
+                // BaseLib 0.2.1.0 but game loaded BaseLib 0.1.0.0).
+                if (!_defaultAlcResolvingRegistered)
+                {
+                    AssemblyLoadContext.Default.Resolving += DefaultAlcResolving;
+                    _defaultAlcResolvingRegistered = true;
+                }
+                assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(dllPath);
+                ModEntry.WriteLog($"[HotReload] Loaded into default ALC (tier {tier}): {assembly.FullName}");
+            }
+
+            assemblyName = assembly.FullName;
+            actions.Add(alcCollectible ? "assembly_loaded_collectible" : "assembly_loaded");
+            if (depsLoaded > 0)
+                actions.Add($"dependencies_loaded:{depsLoaded}");
+            ModEntry.WriteLog($"[HotReload] Assembly: {assembly.FullName} (+{depsLoaded} deps, collectible={alcCollectible})");
+        }
+        catch (Exception ex)
+        {
+            errors.Add($"assembly_load: {ex.Message}");
+            ModEntry.WriteLog($"[HotReload] Assembly load failed: {ex}");
+            ExceptionMonitor.Record(ex, "HotReload.AssemblyLoad");
+            CleanupStagedHotReloadArtifacts();
+            return Finish();
+        }
+        stepTimings["step1_assembly_load"] = sw.ElapsedMilliseconds - lastLap;
+        lastLap = sw.ElapsedMilliseconds;
+
+        // ── Step 2: Stage new Harmony patches ──
+        SetHotReloadProgress(modKey, "patching_harmony");
+        try
+        {
+            var hotReloadId = $"com.mcptest.hotreload.{modKey}.{DateTime.UtcNow.Ticks}";
+            stagedHotReloadHarmony = new Harmony(hotReloadId);
+            stagedHotReloadHarmony.PatchAll(assembly);
+            var patchedMethods = Harmony.GetAllPatchedMethods().ToList();
+            patchCount = patchedMethods
+                .Select(m => Harmony.GetPatchInfo(m))
+                .Where(info => info != null)
+                .Select(info => info!.Prefixes.Count(pa => pa.owner == hotReloadId)
+                              + info.Postfixes.Count(pa => pa.owner == hotReloadId)
+                              + info.Transpilers.Count(pa => pa.owner == hotReloadId))
+                .Sum();
+            actions.Add("harmony_staged");
+            ModEntry.WriteLog($"[HotReload] Harmony staged under {hotReloadId}, {patchCount} patches");
+        }
+        catch (Exception ex)
+        {
+            errors.Add($"harmony: {ex.Message}");
+            ModEntry.WriteLog($"[HotReload] Harmony error: {ex}");
+            CleanupStagedHotReloadArtifacts();
+        }
+        stepTimings["step2_harmony_patch"] = sw.ElapsedMilliseconds - lastLap;
+        lastLap = sw.ElapsedMilliseconds;
+
+        // Tier 1 stops here
+        if (tier < 2)
+        {
+            if (stagedHotReloadHarmony != null)
+            {
+                session!.HotReloadHarmony = stagedHotReloadHarmony;
+                session.LoadContext = stagedLoadContext;
+                session.LastLoadedAssembly = assembly;
+                sessionCommitted = true;
+                if (priorHotReloadHarmony != null && priorHotReloadHarmony.Id != stagedHotReloadHarmony.Id)
+                {
+                    try
+                    {
+                        priorHotReloadHarmony.UnpatchAll(priorHotReloadHarmony.Id);
+                        actions.Add("previous_harmony_unpatched");
+                    }
+                    catch (Exception ex)
+                    {
+                        warnings.Add($"previous_harmony_unpatch: {ex.Message}");
+                    }
+                }
+
+                var staleRemoved = RemoveStalePatchesForMod(modKey, assembly);
+                if (staleRemoved > 0)
+                    actions.Add($"stale_patches_removed:{staleRemoved}");
+
+                if (priorLoadContext != null && !ReferenceEquals(priorLoadContext, stagedLoadContext))
+                    UnloadCollectibleLoadContext(priorLoadContext, warnings, "prior_alc_unload");
+
+                actions.Add("harmony_repatched");
+            }
+            else
+            {
+                errors.Add("harmony: no staged hot-reload Harmony instance was created");
+            }
+
+            return Finish();
+        }
+
+        // ── Step 3: Update Mod.assembly reference in ModManager ──
+        SetHotReloadProgress(modKey, "updating_mod_reference");
+        try
+        {
+            var loadedModsField = typeof(ModManager).GetField("_loadedMods", BindingFlags.NonPublic | BindingFlags.Static);
+            if (loadedModsField != null)
+            {
+                var loadedMods = loadedModsField.GetValue(null) as IList;
+                int updatedModRefs = 0;
+                if (loadedMods != null)
+                {
+                    foreach (var mod in loadedMods)
+                    {
+                        var asmProp = mod.GetType().GetField("assembly", BindingFlags.Public | BindingFlags.Instance);
+                        var currentAsm = asmProp?.GetValue(mod) as Assembly;
+                        if (asmProp != null
+                            && currentAsm != null
+                            && string.Equals(NormalizeHotReloadModKey(currentAsm.GetName().Name), modKey, StringComparison.OrdinalIgnoreCase))
+                        {
+                            previousModAssemblyRefs.Add((mod, asmProp, currentAsm));
+                            asmProp.SetValue(mod, assembly);
+                            updatedModRefs++;
+                        }
+                    }
+                }
+                if (updatedModRefs > 0)
+                {
+                    actions.Add("mod_reference_updated");
+                    ModEntry.WriteLog($"[HotReload] Updated Mod.assembly on {updatedModRefs} loaded mod reference(s) for {modKey}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            errors.Add($"mod_ref: {ex.Message}");
+            ModEntry.WriteLog($"[HotReload] Mod reference update error: {ex}");
+        }
+        stepTimings["step3_mod_reference"] = sw.ElapsedMilliseconds - lastLap;
+        lastLap = sw.ElapsedMilliseconds;
+
+        // ── Step 4: Invalidate ReflectionHelper._modTypes cache ──
+        SetHotReloadProgress(modKey, "invalidating_reflection_cache");
+        try
+        {
+            var modTypesField = typeof(ReflectionHelper).GetField("_modTypes", BindingFlags.NonPublic | BindingFlags.Static);
+            modTypesField?.SetValue(null, null);
+            actions.Add("reflection_cache_invalidated");
+            ModEntry.WriteLog("[HotReload] ReflectionHelper._modTypes invalidated");
+        }
+        catch (Exception ex)
+        {
+            errors.Add($"reflection_cache: {ex.Message}");
+            ModEntry.WriteLog($"[HotReload] Reflection cache error: {ex}");
+        }
+        stepTimings["step4_reflection_cache"] = sw.ElapsedMilliseconds - lastLap;
+        lastLap = sw.ElapsedMilliseconds;
+
+        // ── Step 5: Register new entity IDs in ModelIdSerializationCache ──
+        SetHotReloadProgress(modKey, "registering_entity_ids");
+        // The cache maps category/entry names to net IDs for serialization.
+        // Built at boot time, so hot-reloaded entities aren't in it. We must
+        // register them BEFORE constructing any ModelId objects.
+        // Collect entity types and sort so dependencies are injected first:
+        // Powers before Cards (cards may reference powers via PowerVar<T>),
+        // Monsters before Encounters (encounters reference monsters).
+        newModelTypes = GetLoadableTypes(assembly, warnings, "new_assembly_types")
+            .Where(t => !t.IsAbstract && !t.IsInterface && InheritsFromByName(t, "AbstractModel"))
+            .OrderBy(t => GetInjectionPriority(t))
+            .ToList();
+
+        try
+        {
+            var cacheType = typeof(ModelId).Assembly.GetType("MegaCrit.Sts2.Core.Multiplayer.Serialization.ModelIdSerializationCache");
+            if (cacheType != null)
+            {
+                serializationSnapshot = CaptureSerializationCacheSnapshot(cacheType);
+                var categoryMap = cacheType.GetField("_categoryNameToNetIdMap", BindingFlags.NonPublic | BindingFlags.Static)
+                    ?.GetValue(null) as Dictionary<string, int>;
+                var categoryList = cacheType.GetField("_netIdToCategoryNameMap", BindingFlags.NonPublic | BindingFlags.Static)
+                    ?.GetValue(null) as List<string>;
+                var entryMap = cacheType.GetField("_entryNameToNetIdMap", BindingFlags.NonPublic | BindingFlags.Static)
+                    ?.GetValue(null) as Dictionary<string, int>;
+                var entryList = cacheType.GetField("_netIdToEntryNameMap", BindingFlags.NonPublic | BindingFlags.Static)
+                    ?.GetValue(null) as List<string>;
+
+                int registered = 0;
+                foreach (var newType in newModelTypes)
+                {
+                    var (category, entry) = GetCategoryAndEntry(newType);
+                    if (categoryMap != null && categoryList != null && !categoryMap.ContainsKey(category))
+                    {
+                        categoryMap[category] = categoryList.Count;
+                        categoryList.Add(category);
+                    }
+                    if (entryMap != null && entryList != null && !entryMap.ContainsKey(entry))
+                    {
+                        entryMap[entry] = entryList.Count;
+                        entryList.Add(entry);
+                        registered++;
+                    }
+                }
+                if (registered > 0)
+                {
+                    // Update bit sizes (used by network serialization)
+                    var catBitProp = cacheType.GetProperty("CategoryIdBitSize", BindingFlags.Public | BindingFlags.Static);
+                    var entBitProp = cacheType.GetProperty("EntryIdBitSize", BindingFlags.Public | BindingFlags.Static);
+                    if (catBitProp?.SetMethod != null && categoryList != null)
+                        catBitProp.SetValue(null, ComputeBitSize(categoryList.Count));
+                    if (entBitProp?.SetMethod != null && entryList != null)
+                        entBitProp.SetValue(null, ComputeBitSize(entryList.Count));
+
+                    actions.Add($"serialization_cache_updated:{registered}");
+                    ModEntry.WriteLog($"[HotReload] Registered {registered} new entity IDs in ModelIdSerializationCache");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            warnings.Add($"serialization_cache: {ex.Message}");
+            ModEntry.WriteLog($"[HotReload] Serialization cache update warning: {ex}");
+        }
+        stepTimings["step5_serialization_cache"] = sw.ElapsedMilliseconds - lastLap;
+        lastLap = sw.ElapsedMilliseconds;
+
+        // ── Step 6: Transactionally replace entities in ModelDb ──
+        SetHotReloadProgress(modKey, "reloading_entities");
+        var entitySnapshot = new Dictionary<ModelId, AbstractModel>();
+        try
+        {
+            var contentByIdField = typeof(ModelDb).GetField("_contentById", BindingFlags.NonPublic | BindingFlags.Static);
+            var typedDict = contentByIdField?.GetValue(null) as Dictionary<ModelId, AbstractModel>;
+            if (typedDict == null)
+                throw new InvalidOperationException("ModelDb._contentById not found");
+
+            var affectedIds = new HashSet<ModelId>();
+            var oldTypeSignatures = new Dictionary<string, int>(StringComparer.Ordinal);
+            var removedTypeNames = new Dictionary<ModelId, string>();
+            foreach (var oldAssembly in GetAssembliesForHotReloadMod(modKey, assembly))
+            {
+                foreach (var oldType in GetLoadableTypes(oldAssembly, warnings, $"old_assembly_types:{oldAssembly.FullName}")
+                    .Where(t => !t.IsAbstract && !t.IsInterface && InheritsFromByName(t, "AbstractModel")))
+                {
+                    try
+                    {
+                        var id = BuildModelId(oldType);
+                        affectedIds.Add(id);
+                        removedTypeNames[id] = oldType.Name;
+                        if (typedDict.TryGetValue(id, out var existing))
+                            entitySnapshot[id] = existing;
+                        oldTypeSignatures[oldType.FullName ?? oldType.Name] = ComputeTypeSignatureHash(oldType);
+                    }
+                    catch (Exception ex)
+                    {
+                        warnings.Add($"snapshot_{oldType.Name}: {ex.Message}");
+                    }
+                }
+            }
+
+            foreach (var newType in newModelTypes)
+            {
+                try
+                {
+                    var id = BuildModelId(newType);
+                    affectedIds.Add(id);
+                    if (typedDict.TryGetValue(id, out var existing))
+                        entitySnapshot[id] = existing;
+                }
+                catch (Exception ex)
+                {
+                    warnings.Add($"snapshot_{newType.Name}: {ex.Message}");
+                }
+            }
+
+            var stagedModels = new Dictionary<ModelId, AbstractModel>();
+            foreach (var newType in newModelTypes)
+            {
+                try
+                {
+                    var id = BuildModelId(newType);
+                    var fullName = newType.FullName ?? newType.Name;
+                    if (oldTypeSignatures.TryGetValue(fullName, out var oldHash)
+                        && entitySnapshot.TryGetValue(id, out var existing)
+                        && ComputeTypeSignatureHash(newType) == oldHash)
+                    {
+                        stagedModels[id] = existing;
+                        entitiesSkipped++;
+                        changedEntities.Add(new { name = newType.Name, action = "unchanged" });
+                        continue;
+                    }
+
+                    var instance = Activator.CreateInstance(newType);
+                    if (instance is not AbstractModel model)
+                        throw new InvalidOperationException($"{newType.FullName} is not assignable to AbstractModel at runtime");
+
+                    model.InitId(id);
+                    stagedModels[id] = model;
+                    entitiesInjected++;
+                    changedEntities.Add(new { name = newType.Name, action = "injected", id = id.ToString() });
+                    ModEntry.WriteLog($"[HotReload] Staged: {newType.Name} as {id}");
+                }
+                catch (Exception ex)
+                {
+                    errors.Add($"inject_{newType.Name}: {ex.Message}");
+                }
+            }
+
+            if (errors.Any(e => e.StartsWith("inject_", StringComparison.Ordinal)))
+                throw new InvalidOperationException("Entity staging failed; ModelDb changes were not committed.");
+
+            int removedThisCommit = 0;
+            foreach (var id in affectedIds)
+            {
+                if (typedDict.Remove(id))
+                    removedThisCommit++;
+            }
+            entitiesRemoved = removedThisCommit;
+
+            foreach (var (id, removedName) in removedTypeNames)
+            {
+                if (!stagedModels.ContainsKey(id))
+                    changedEntities.Add(new { name = removedName, action = "removed" });
+            }
+
+            foreach (var (id, model) in stagedModels)
+                typedDict[id] = model;
+
+            actions.Add("entities_reregistered");
+            if (entitiesSkipped > 0)
+                actions.Add($"entities_unchanged:{entitiesSkipped}");
+            ModEntry.WriteLog($"[HotReload] Entities: {entitiesRemoved} removed, {entitiesInjected} injected, {entitiesSkipped} unchanged (skipped)");
+        }
+        catch (Exception ex)
+        {
+            errors.Add($"entity_reload: {ex.Message}");
+            ModEntry.WriteLog($"[HotReload] Entity reload error: {ex}");
+
+            try
+            {
+                var contentByIdField = typeof(ModelDb).GetField("_contentById", BindingFlags.NonPublic | BindingFlags.Static);
+                var rollbackDict = contentByIdField?.GetValue(null) as Dictionary<ModelId, AbstractModel>;
+                if (rollbackDict != null)
+                    RestoreEntitySnapshot(rollbackDict, entitySnapshot, modKey);
+            }
+            catch (Exception rollbackEx)
+            {
+                errors.Add($"rollback_entities: {rollbackEx.Message}");
+            }
+
+            foreach (var (modRef, asmField, previousAssembly) in previousModAssemblyRefs)
+            {
+                try
+                {
+                    asmField.SetValue(modRef, previousAssembly);
+                }
+                catch (Exception rollbackEx)
+                {
+                    warnings.Add($"rollback_mod_ref: {rollbackEx.Message}");
+                }
+            }
+
+            try
+            {
+                var modTypesField = typeof(ReflectionHelper).GetField("_modTypes", BindingFlags.NonPublic | BindingFlags.Static);
+                modTypesField?.SetValue(null, null);
+            }
+            catch (Exception rollbackEx)
+            {
+                warnings.Add($"rollback_reflection_cache: {rollbackEx.Message}");
+            }
+
+            RestoreSerializationCacheSnapshot(serializationSnapshot);
+            CleanupStagedHotReloadArtifacts();
+            return Finish();
+        }
+        stepTimings["step6_entity_reload"] = sw.ElapsedMilliseconds - lastLap;
+        lastLap = sw.ElapsedMilliseconds;
+
+        // ── Step 7: Null ModelDb cached enumerables ──
+        SetHotReloadProgress(modKey, "clearing_modeldb_caches");
+        try
+        {
+            string[] cacheFields = {
+                "_allCards", "_allCardPools", "_allCharacterCardPools",
+                "_allSharedEvents", "_allEvents", "_allEncounters", "_allPotions",
+                "_allPotionPools", "_allCharacterPotionPools", "_allSharedPotionPools",
+                "_allPowers", "_allRelics", "_allCharacterRelicPools", "_achievements"
+            };
+            foreach (var fieldName in cacheFields)
+            {
+                var field = typeof(ModelDb).GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Static);
+                field?.SetValue(null, null);
+            }
+            actions.Add("modeldb_caches_cleared");
+            ModEntry.WriteLog("[HotReload] ModelDb caches cleared");
+        }
+        catch (Exception ex)
+        {
+            errors.Add($"modeldb_caches: {ex.Message}");
+            ModEntry.WriteLog($"[HotReload] ModelDb cache clear error: {ex}");
+        }
+        stepTimings["step7_modeldb_caches"] = sw.ElapsedMilliseconds - lastLap;
+        lastLap = sw.ElapsedMilliseconds;
+
+        // ── Step 8: Unfreeze pools + re-register pool content ──
+        SetHotReloadProgress(modKey, "refreshing_pools");
+        try
+        {
+            var poolResult = UnfreezeAndReregisterPools(assembly, modKey, hasPoolRegs ? poolRegistrations : default, hasPoolRegs, errors, warnings);
+            poolsUnfrozen = poolResult.unfrozen;
+            poolRegs = poolResult.registered;
+            actions.Add("pools_refreshed");
+            ModEntry.WriteLog($"[HotReload] Pools unfrozen: {poolsUnfrozen}, registered: {poolRegs}");
+        }
+        catch (Exception ex)
+        {
+            errors.Add($"pool_refresh: {ex.Message}");
+            ModEntry.WriteLog($"[HotReload] Pool refresh error: {ex}");
+        }
+        stepTimings["step8_pools"] = sw.ElapsedMilliseconds - lastLap;
+        lastLap = sw.ElapsedMilliseconds;
+
+        // ── Step 9: Reload localization ──
+        SetHotReloadProgress(modKey, "reloading_localization");
+        try
+        {
+            var locManager = LocManager.Instance;
+            if (locManager != null)
+            {
+                locManager.SetLanguage(locManager.Language);
+                locReloaded = true;
+                actions.Add("localization_reloaded");
+                ModEntry.WriteLog("[HotReload] Localization reloaded");
+            }
+            else
+            {
+                warnings.Add("LocManager.Instance is null");
+            }
+        }
+        catch (Exception ex)
+        {
+            errors.Add($"localization: {ex.Message}");
+            ModEntry.WriteLog($"[HotReload] Localization reload error: {ex}");
+        }
+        stepTimings["step9_localization"] = sw.ElapsedMilliseconds - lastLap;
+        lastLap = sw.ElapsedMilliseconds;
+
+        // ── Step 10 (Tier 3): Remount PCK ──
+        SetHotReloadProgress(modKey, "remounting_pck");
+        if (tier >= 3 && !string.IsNullOrEmpty(pckPath) && File.Exists(pckPath))
+        {
+            try
+            {
+                bool loaded = ProjectSettings.LoadResourcePack(pckPath);
+                if (loaded)
+                {
+                    pckReloaded = true;
+                    actions.Add("pck_remounted");
+                    ModEntry.WriteLog($"[HotReload] PCK remounted: {pckPath}");
+
+                    // Re-trigger loc reload to pick up new PCK loc files
+                    try
+                    {
+                        LocManager.Instance?.SetLanguage(LocManager.Instance.Language);
+                    }
+                    catch { /* already reported above if loc system is broken */ }
+                }
+                else
+                {
+                    errors.Add($"pck_load_failed: Godot returned false for {pckPath}");
+                }
+            }
+            catch (Exception ex)
+            {
+                errors.Add($"pck: {ex.Message}");
+                ModEntry.WriteLog($"[HotReload] PCK reload error: {ex}");
+            }
+        }
+        else if (tier >= 3 && string.IsNullOrEmpty(pckPath))
+        {
+            warnings.Add("Tier 3 requested but no pck_path provided");
+        }
+
+        if (!alcCollectible)
+            warnings.Add("Old assembly loaded into default ALC (non-collectible); memory will accumulate");
+        stepTimings["step10_pck"] = sw.ElapsedMilliseconds - lastLap;
+        lastLap = sw.ElapsedMilliseconds;
+
+        // ── Step 11: Verify injected entities exist in ModelDb ──
+        SetHotReloadProgress(modKey, "verifying_entities");
+        // Also try ToMutable() on cards to catch PowerVar<T> resolution failures early.
+        if (tier >= 2 && entitiesInjected > 0)
+        {
+            try
+            {
+                var injectedTypes = GetLoadableTypes(assembly, null, null)
+                    .Where(t => !t.IsAbstract && !t.IsInterface
+                        && (t.IsSubclassOf(typeof(AbstractModel)) || InheritsFromByName(t, "AbstractModel")))
+                    .OrderBy(t => GetInjectionPriority(t))
+                    .ToList();
+                foreach (var type in injectedTypes)
+                {
+                    if (ModelDb.Contains(type))
+                        verified++;
+                    else
+                        verifyFailed++;
+                }
+                if (verifyFailed > 0)
+                    warnings.Add($"verify: {verifyFailed}/{injectedTypes.Count} injected types missing from ModelDb");
+                else
+                    actions.Add($"verified:{verified}_entities_in_modeldb");
+
+                // ToMutable sanity check on injected cards
+                var contentByIdField = typeof(ModelDb).GetField("_contentById", BindingFlags.NonPublic | BindingFlags.Static);
+                var typedDict = contentByIdField?.GetValue(null) as Dictionary<ModelId, AbstractModel>;
+                if (typedDict != null)
+                {
+                    foreach (var cardType in injectedTypes.Where(t => InheritsFromByName(t, "CardModel")))
+                    {
+                        try
+                        {
+                            var cardId = BuildModelId(cardType);
+                            if (typedDict.TryGetValue(cardId, out var cardModel) && cardModel is CardModel card)
+                            {
+                                var mutable = card.ToMutable();
+                                mutableOk++;
+                                ModEntry.WriteLog($"[HotReload] ToMutable OK: {cardType.Name}");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            mutableFailed++;
+                            var inner = ex.InnerException ?? ex;
+                            warnings.Add($"ToMutable_{cardType.Name}: {inner.GetType().Name}: {inner.Message}");
+                            ModEntry.WriteLog($"[HotReload] ToMutable FAILED: {cardType.Name}: {inner}");
+                        }
+                    }
+                    if (mutableOk > 0) actions.Add($"mutable_check_passed:{mutableOk}");
+                    if (mutableFailed > 0) actions.Add($"mutable_check_failed:{mutableFailed}");
+                }
+            }
+            catch (Exception ex)
+            {
+                warnings.Add($"verify_error: {ex.Message}");
+            }
+        }
+        stepTimings["step11_verify"] = sw.ElapsedMilliseconds - lastLap;
+        lastLap = sw.ElapsedMilliseconds;
+
+        // ── Step 12: Refresh live instances (cards/relics/powers in scene tree) ──
+        SetHotReloadProgress(modKey, "refreshing_live_instances");
+        if (tier >= 2 && entitiesInjected > 0)
+        {
+            try
+            {
+                var refreshResult = RefreshLiveInstances();
+                var totalProp = refreshResult.GetType().GetProperty("total_refreshed");
+                if (totalProp != null)
+                    liveRefreshed = (int)totalProp.GetValue(refreshResult)!;
+                if (liveRefreshed > 0)
+                    actions.Add($"live_instances_refreshed:{liveRefreshed}");
+                ModEntry.WriteLog($"[HotReload] Live instances refreshed: {liveRefreshed}");
+            }
+            catch (Exception ex)
+            {
+                warnings.Add($"live_refresh: {ex.Message}");
+            }
+
+            // Run-scoped refresh: update mutable card/relic instances in the current run
+            try
+            {
+                int runRefreshed = RefreshRunInstances(assembly, modKey);
+                if (runRefreshed > 0)
+                {
+                    actions.Add($"run_instances_refreshed:{runRefreshed}");
+                    ModEntry.WriteLog($"[HotReload] Run instances refreshed: {runRefreshed}");
+                }
+            }
+            catch (Exception ex)
+            {
+                warnings.Add($"run_refresh: {ex.Message}");
+            }
+        }
+        stepTimings["step12_live_refresh"] = sw.ElapsedMilliseconds - lastLap;
+        lastLap = sw.ElapsedMilliseconds;
+
+        try
+        {
+            if (stagedHotReloadHarmony != null)
+            {
+                session!.HotReloadHarmony = stagedHotReloadHarmony;
+                actions.Add("harmony_repatched");
+            }
+            session!.LoadContext = stagedLoadContext;
+            session.LastLoadedAssembly = assembly;
+            sessionCommitted = true;
+
+            if (priorHotReloadHarmony != null
+                && stagedHotReloadHarmony != null
+                && priorHotReloadHarmony.Id != stagedHotReloadHarmony.Id)
+            {
+                try
+                {
+                    priorHotReloadHarmony.UnpatchAll(priorHotReloadHarmony.Id);
+                    actions.Add("previous_harmony_unpatched");
+                }
+                catch (Exception ex)
+                {
+                    warnings.Add($"previous_harmony_unpatch: {ex.Message}");
+                }
+            }
+
+            var staleRemoved = RemoveStalePatchesForMod(modKey, assembly);
+            if (staleRemoved > 0)
+            {
+                actions.Add($"stale_patches_removed:{staleRemoved}");
+                ModEntry.WriteLog($"[HotReload] Removed {staleRemoved} stale patches from old assemblies for {modKey}");
+            }
+
+            if (priorLoadContext != null && !ReferenceEquals(priorLoadContext, stagedLoadContext))
+                UnloadCollectibleLoadContext(priorLoadContext, warnings, "prior_alc_unload");
+        }
+        catch (Exception ex)
+        {
+            errors.Add($"session_commit: {ex.Message}");
+            warnings.Add($"session_commit_warning: {ex.Message}");
+        }
+
+        return Finish();
+    }
+
+    private static int ComputeBitSize(int count)
+    {
+        return count <= 1 ? 0 : (int)Math.Ceiling(Math.Log2(count));
+    }
+
+    private static SerializationCacheSnapshot? CaptureSerializationCacheSnapshot(Type cacheType)
+    {
+        return new SerializationCacheSnapshot
+        {
+            CacheType = cacheType,
+            CategoryMap = (cacheType.GetField("_categoryNameToNetIdMap", BindingFlags.NonPublic | BindingFlags.Static)
+                ?.GetValue(null) as Dictionary<string, int>) is { } categoryMap
+                ? new Dictionary<string, int>(categoryMap)
+                : null,
+            CategoryList = (cacheType.GetField("_netIdToCategoryNameMap", BindingFlags.NonPublic | BindingFlags.Static)
+                ?.GetValue(null) as List<string>) is { } categoryList
+                ? [.. categoryList]
+                : null,
+            EntryMap = (cacheType.GetField("_entryNameToNetIdMap", BindingFlags.NonPublic | BindingFlags.Static)
+                ?.GetValue(null) as Dictionary<string, int>) is { } entryMap
+                ? new Dictionary<string, int>(entryMap)
+                : null,
+            EntryList = (cacheType.GetField("_netIdToEntryNameMap", BindingFlags.NonPublic | BindingFlags.Static)
+                ?.GetValue(null) as List<string>) is { } entryList
+                ? [.. entryList]
+                : null,
+            CategoryBitSize = cacheType.GetProperty("CategoryIdBitSize", BindingFlags.Public | BindingFlags.Static)?.GetValue(null) as int?,
+            EntryBitSize = cacheType.GetProperty("EntryIdBitSize", BindingFlags.Public | BindingFlags.Static)?.GetValue(null) as int?,
+        };
+    }
+
+    private static void RestoreSerializationCacheSnapshot(SerializationCacheSnapshot? snapshot)
+    {
+        if (snapshot?.CacheType == null)
+            return;
+
+        var cacheType = snapshot.CacheType;
+        cacheType.GetField("_categoryNameToNetIdMap", BindingFlags.NonPublic | BindingFlags.Static)
+            ?.SetValue(null, snapshot.CategoryMap != null ? new Dictionary<string, int>(snapshot.CategoryMap) : null);
+        cacheType.GetField("_netIdToCategoryNameMap", BindingFlags.NonPublic | BindingFlags.Static)
+            ?.SetValue(null, snapshot.CategoryList != null ? new List<string>(snapshot.CategoryList) : null);
+        cacheType.GetField("_entryNameToNetIdMap", BindingFlags.NonPublic | BindingFlags.Static)
+            ?.SetValue(null, snapshot.EntryMap != null ? new Dictionary<string, int>(snapshot.EntryMap) : null);
+        cacheType.GetField("_netIdToEntryNameMap", BindingFlags.NonPublic | BindingFlags.Static)
+            ?.SetValue(null, snapshot.EntryList != null ? new List<string>(snapshot.EntryList) : null);
+
+        var catBitProp = cacheType.GetProperty("CategoryIdBitSize", BindingFlags.Public | BindingFlags.Static);
+        if (catBitProp?.SetMethod != null && snapshot.CategoryBitSize.HasValue)
+            catBitProp.SetValue(null, snapshot.CategoryBitSize.Value);
+        var entryBitProp = cacheType.GetProperty("EntryIdBitSize", BindingFlags.Public | BindingFlags.Static);
+        if (entryBitProp?.SetMethod != null && snapshot.EntryBitSize.HasValue)
+            entryBitProp.SetValue(null, snapshot.EntryBitSize.Value);
+    }
+
+    private static void RestoreEntitySnapshot(Dictionary<ModelId, AbstractModel> target, Dictionary<ModelId, AbstractModel> snapshot, string modKey)
+    {
+        var snapshotIds = snapshot.Keys.ToHashSet();
+        foreach (var existingId in target.Keys.ToList())
+        {
+            if (snapshotIds.Contains(existingId))
+                continue;
+            if (target[existingId] is AbstractModel model
+                && string.Equals(NormalizeHotReloadModKey(model.GetType().Assembly.GetName().Name), modKey, StringComparison.OrdinalIgnoreCase))
+            {
+                target.Remove(existingId);
+            }
+        }
+
+        foreach (var (id, model) in snapshot)
+            target[id] = model;
+    }
+
+    private static void UnloadCollectibleLoadContext(AssemblyLoadContext loadContext, List<string> warnings, string warningPrefix)
+    {
+        try
+        {
+            loadContext.Unload();
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+        }
+        catch (Exception ex)
+        {
+            warnings.Add($"{warningPrefix}: {ex.Message}");
+        }
+    }
+
+    private static int RemoveStalePatchesForMod(string modKey, Assembly currentAssembly)
+    {
+        int staleRemoved = 0;
+        foreach (var method in Harmony.GetAllPatchedMethods().ToList())
+        {
+            var patchInfo = Harmony.GetPatchInfo(method);
+            if (patchInfo == null)
+                continue;
+
+            foreach (var patch in patchInfo.Prefixes.Concat(patchInfo.Postfixes).Concat(patchInfo.Transpilers))
+            {
+                if (patch.PatchMethod?.DeclaringType?.Assembly is not Assembly patchAsm)
+                    continue;
+                if (patchAsm == currentAssembly)
+                    continue;
+                if (!string.Equals(NormalizeHotReloadModKey(patchAsm.GetName().Name), modKey, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                try
+                {
+                    var ownerHarmony = new Harmony(patch.owner);
+                    ownerHarmony.Unpatch(method, patch.PatchMethod);
+                    staleRemoved++;
+                }
+                catch
+                {
+                    // best effort
+                }
+            }
+        }
+
+        return staleRemoved;
+    }
+
+    private static object GetReloadHistory()
+    {
+        lock (_reloadHistory)
+        {
+            return new
+            {
+                count = _reloadHistory.Count,
+                max_stored = MaxReloadHistory,
+                history = _reloadHistory.ToArray(),
+            };
+        }
+    }
+
+    private static (int unfrozen, int registered) UnfreezeAndReregisterPools(
+        Assembly newAssembly,
+        string modKey,
+        JsonElement poolRegistrations,
+        bool hasPoolRegs,
+        List<string> errors,
+        List<string> warnings)
+    {
+        int unfrozen = 0;
+        int registered = 0;
+
+        // Collect the type names from the reloaded assembly so we only remove
+        // entries belonging to this mod, not other mods' pool registrations.
+        var reloadedTypeNames = new HashSet<string>(
+            GetLoadableTypes(newAssembly, warnings, "pool_type_scan")
+                .Where(t => !t.IsAbstract && !t.IsInterface)
+                .Select(t => t.FullName ?? t.Name));
+        // Also include old assembly type names so stale entries get cleaned up
+        foreach (var oldAsm in GetAssembliesForHotReloadMod(modKey, newAssembly))
+        {
+            foreach (var t in GetLoadableTypes(oldAsm, null, null).Where(t => !t.IsAbstract && !t.IsInterface))
+                reloadedTypeNames.Add(t.FullName ?? t.Name);
+        }
+
+        // Access ModHelper._moddedContentForPools via reflection
+        var poolsField = typeof(ModHelper).GetField("_moddedContentForPools", BindingFlags.NonPublic | BindingFlags.Static);
+        if (poolsField == null)
+        {
+            warnings.Add("ModHelper._moddedContentForPools not found");
+            return (0, 0);
+        }
+
+        var pools = poolsField.GetValue(null) as IDictionary;
+        if (pools != null)
+        {
+            // Unfreeze pools and remove only entries from the reloaded mod
+            foreach (var key in pools.Keys.Cast<object>().ToList())
+            {
+                var content = pools[key];
+                if (content == null) continue;
+                var contentType = content.GetType();
+                var frozenField = contentType.GetField("isFrozen");
+                var modelsField = contentType.GetField("modelsToAdd");
+                if (frozenField != null)
+                {
+                    bool wasFrozen = (bool)frozenField.GetValue(content)!;
+                    if (wasFrozen)
+                    {
+                        frozenField.SetValue(content, false);
+                        unfrozen++;
+                    }
+                }
+                // Only remove entries belonging to the reloaded mod, not other mods
+                if (modelsField?.GetValue(content) is IList modelsList)
+                {
+                    for (int i = modelsList.Count - 1; i >= 0; i--)
+                    {
+                        var entry = modelsList[i];
+                        if (entry != null)
+                        {
+                            var entryTypeName = entry.GetType().FullName ?? entry.GetType().Name;
+                            if (reloadedTypeNames.Contains(entryTypeName))
+                                modelsList.RemoveAt(i);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Null pool instance caches so they re-enumerate on next access
+        NullPoolInstanceCaches();
+
+        // Re-register pool entries from explicit registrations
+        if (hasPoolRegs && poolRegistrations.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var reg in poolRegistrations.EnumerateArray())
+            {
+                try
+                {
+                    string? poolTypeName = reg.TryGetProperty("pool_type", out var pt) ? pt.GetString() : null;
+                    string? modelTypeName = reg.TryGetProperty("model_type", out var mt) ? mt.GetString() : null;
+                    if (poolTypeName == null || modelTypeName == null) continue;
+
+                    var poolType = FindTypeByName(null, poolTypeName);
+                    var modelType = FindTypeByName(newAssembly, modelTypeName, modKey);
+
+                    if (poolType == null)
+                    {
+                        warnings.Add($"pool_type_not_found: {poolTypeName}");
+                        continue;
+                    }
+                    if (modelType == null)
+                    {
+                        warnings.Add($"model_type_not_found: {modelTypeName}");
+                        continue;
+                    }
+
+                    ModHelper.AddModelToPool(poolType, modelType);
+                    registered++;
+                    ModEntry.WriteLog($"[HotReload] Pool reg (explicit): {modelTypeName} → {poolTypeName}");
+                }
+                catch (Exception ex)
+                {
+                    errors.Add($"pool_reg: {ex.Message}");
+                }
+            }
+        }
+        else
+        {
+            // Assembly-level pool discovery: find [Pool(typeof(...))] attributes via reflection
+            // This is 100% accurate — reads compiled attributes, not regex on source
+            registered = DiscoverAndRegisterPoolsFromAssembly(newAssembly, errors, warnings);
+        }
+
+        return (unfrozen, registered);
+    }
+
+    private static void NullPoolInstanceCaches()
+    {
+        // Null lazy caches on pool model base types so they re-enumerate via ConcatModelsFromMods
+        // CardPoolModel: _allCards (CardModel[]?), _allCardIds (HashSet<ModelId>?)
+        NullInstanceFieldsOnPoolType(typeof(CardPoolModel), "_allCards", "_allCardIds");
+        // RelicPoolModel: _relics (IEnumerable<RelicModel>?), _allRelicIds (HashSet<ModelId>?)
+        NullInstanceFieldsOnPoolType(typeof(RelicPoolModel), "_relics", "_allRelicIds");
+        // PotionPoolModel: _allPotions (IEnumerable<PotionModel>?), _allPotionIds (HashSet<ModelId>?)
+        NullInstanceFieldsOnPoolType(typeof(PotionPoolModel), "_allPotions", "_allPotionIds");
+    }
+
+    private static void NullInstanceFieldsOnPoolType(Type basePoolType, params string[] fieldNames)
+    {
+        // Pool instances are singletons stored in ModelDb._contentById
+        // We need to null the lazy fields on each concrete pool instance
+        var contentByIdField = typeof(ModelDb).GetField("_contentById", BindingFlags.NonPublic | BindingFlags.Static);
+        if (contentByIdField == null) return;
+
+        var contentById = contentByIdField.GetValue(null) as IDictionary;
+        if (contentById == null) return;
+
+        foreach (var value in contentById.Values)
+        {
+            if (value == null || !basePoolType.IsAssignableFrom(value.GetType())) continue;
+            foreach (var fieldName in fieldNames)
+            {
+                var field = value.GetType().GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Instance);
+                // Also check base type's private fields
+                if (field == null)
+                    field = basePoolType.GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Instance);
+                field?.SetValue(value, null);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Compute a hash of a type's member signatures for incremental reload comparison.
+    /// If the hash matches between old and new assembly, the type is unchanged.
+    /// </summary>
+    private static int ComputeTypeSignatureHash(Type type)
+    {
+        unchecked
+        {
+            var signatures = new List<string>
+            {
+                $"type:{type.FullName}",
+                $"base:{type.BaseType?.FullName ?? ""}",
+            };
+
+            signatures.AddRange(type.GetInterfaces()
+                .Select(i => $"iface:{i.FullName}")
+                .OrderBy(s => s, StringComparer.Ordinal));
+
+            foreach (var method in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly)
+                .OrderBy(m => m.ToString(), StringComparer.Ordinal))
+            {
+                var methodSig = $"{method.Name}|{method.ReturnType.FullName}|{string.Join(",", method.GetParameters().Select(p => p.ParameterType.FullName))}";
+                try
+                {
+                    var il = method.GetMethodBody()?.GetILAsByteArray();
+                    if (il != null && il.Length > 0)
+                        methodSig += $"|il:{Convert.ToHexString(il)}";
+                }
+                catch { /* some methods do not expose IL */ }
+                signatures.Add($"method:{methodSig}");
+            }
+
+            signatures.AddRange(type.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly)
+                .OrderBy(f => f.Name, StringComparer.Ordinal)
+                .Select(f => $"field:{f.Name}|{f.FieldType.FullName}"));
+
+            signatures.AddRange(type.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly)
+                .OrderBy(p => p.Name, StringComparer.Ordinal)
+                .Select(p => $"prop:{p.Name}|{p.PropertyType.FullName}"));
+
+            foreach (var attr in type.GetCustomAttributesData()
+                .OrderBy(a => a.AttributeType.FullName, StringComparer.Ordinal))
+            {
+                var ctorArgs = string.Join(",", attr.ConstructorArguments.Select(a => a.Value?.ToString() ?? "null"));
+                signatures.Add($"attr:{attr.AttributeType.FullName}|{ctorArgs}");
+            }
+
+            int hash = unchecked((int)2166136261);
+            foreach (var signature in signatures)
+            {
+                foreach (var ch in signature)
+                {
+                    hash ^= ch;
+                    hash *= 16777619;
+                }
+            }
+            return hash;
+        }
+    }
+
+    /// <summary>
+    /// Resolves assembly version mismatches for hot-reloaded mods in the default ALC.
+    /// When a mod references e.g. BaseLib 0.2.1.0 but the game loaded BaseLib 0.1.0.0,
+    /// this handler redirects by assembly name (ignoring version) to avoid FileNotFoundException.
+    /// </summary>
+    private static Assembly? DefaultAlcResolving(AssemblyLoadContext context, AssemblyName name)
+    {
+        var requestedToken = name.GetPublicKeyToken() ?? Array.Empty<byte>();
+        return AppDomain.CurrentDomain.GetAssemblies()
+            .FirstOrDefault(loaded =>
+            {
+                var candidate = loaded.GetName();
+                if (!string.Equals(candidate.Name, name.Name, StringComparison.Ordinal))
+                    return false;
+
+                var candidateToken = candidate.GetPublicKeyToken() ?? Array.Empty<byte>();
+                bool tokenMatches = requestedToken.Length == 0 || candidateToken.SequenceEqual(requestedToken);
+                bool cultureMatches = string.Equals(candidate.CultureName ?? "", name.CultureName ?? "", StringComparison.OrdinalIgnoreCase);
+                return tokenMatches && cultureMatches;
+            });
+    }
+
+    /// <summary>
+    /// Returns an injection priority for entity types. Lower = injected first.
+    /// Powers before cards (cards reference powers via PowerVar&lt;T&gt;),
+    /// monsters before encounters (encounters reference monsters).
+    /// </summary>
+    private static int GetInjectionPriority(Type type)
+    {
+        // Walk the inheritance chain and check by name (cross-ALC safe)
+        if (InheritsFromByName(type, "PowerModel")) return 0;
+        if (InheritsFromByName(type, "RelicModel")) return 1;
+        if (InheritsFromByName(type, "PotionModel")) return 2;
+        if (InheritsFromByName(type, "MonsterModel")) return 3;
+        if (InheritsFromByName(type, "EncounterModel")) return 4;
+        if (InheritsFromByName(type, "CardModel")) return 5;  // Last — may reference powers
+        if (InheritsFromByName(type, "EventModel")) return 6;
+        return 9;
+    }
+
+    /// <summary>
+    /// Get category and entry strings for a type WITHOUT constructing a ModelId.
+    /// Used to register in the serialization cache before ModelId construction.
+    /// </summary>
+    private static (string category, string entry) GetCategoryAndEntry(Type type)
+    {
+        var cursor = type;
+        while (cursor.BaseType != null && cursor.BaseType.Name != "AbstractModel")
+            cursor = cursor.BaseType;
+        string category = ModelId.SlugifyCategory(cursor.Name);
+        string entry = MegaCrit.Sts2.Core.Helpers.StringHelper.Slugify(type.Name);
+        return (category, entry);
+    }
+
+    /// <summary>
+    /// Build a ModelId for a type, compatible with cross-ALC types.
+    /// Replicates ModelDb.GetId logic but uses name-based base type detection.
+    /// Must be called AFTER registering the entity in ModelIdSerializationCache.
+    /// </summary>
+    private static ModelId BuildModelId(Type type)
+    {
+        var (category, entry) = GetCategoryAndEntry(type);
+        return new ModelId(category, entry);
+    }
+
+    /// <summary>
+    /// Check if a type inherits from a base type by walking the type name chain.
+    /// Works across AssemblyLoadContexts where IsSubclassOf fails.
+    /// </summary>
+    private static bool InheritsFromByName(Type type, string baseTypeName)
+    {
+        var cursor = type.BaseType;
+        while (cursor != null)
+        {
+            if (cursor.Name == baseTypeName)
+                return true;
+            cursor = cursor.BaseType;
+        }
+        return false;
+    }
+
+    private static IEnumerable<Type> GetLoadableTypes(Assembly assembly, List<string>? warnings, string? warningPrefix)
+    {
+        try
+        {
+            return assembly.GetTypes();
+        }
+        catch (ReflectionTypeLoadException ex)
+        {
+            if (warnings != null)
+            {
+                warnings.Add($"{warningPrefix ?? "types"}: {ex.Message}");
+                foreach (var loaderEx in ex.LoaderExceptions.Where(e => e != null).Take(3))
+                {
+                    warnings.Add($"{warningPrefix ?? "types"}_loader: {loaderEx!.Message}");
+                }
+            }
+            return ex.Types.Where(t => t != null).Cast<Type>();
+        }
+    }
+
+    private static Type? FindTypeByName(Assembly? preferredAssembly, string typeName, string? preferredModKey = null)
+    {
+        if (string.IsNullOrWhiteSpace(typeName))
+            return null;
+
+        if (Type.GetType(typeName, throwOnError: false) is Type assemblyQualifiedType)
+            return assemblyQualifiedType;
+
+        static bool MatchesRequestedName(Type type, string requestedName, bool requireExactFullName)
+        {
+            if (string.Equals(type.FullName, requestedName, StringComparison.Ordinal))
+                return true;
+            return !requireExactFullName && string.Equals(type.Name, requestedName, StringComparison.Ordinal);
+        }
+
+        bool requireExactFullName = typeName.Contains('.');
+        if (preferredAssembly != null)
+        {
+            var exactPreferred = preferredAssembly.GetType(typeName, throwOnError: false, ignoreCase: false);
+            if (exactPreferred != null)
+                return exactPreferred;
+
+            var preferredMatches = GetLoadableTypes(preferredAssembly, null, null)
+                .Where(t => MatchesRequestedName(t, typeName, requireExactFullName))
+                .ToList();
+
+            if (preferredMatches.Count == 1)
+                return preferredMatches[0];
+
+            var preferredExactFullName = preferredMatches
+                .FirstOrDefault(t => string.Equals(t.FullName, typeName, StringComparison.Ordinal));
+            if (preferredExactFullName != null)
+                return preferredExactFullName;
+        }
+
+        IEnumerable<Assembly> assemblies = AppDomain.CurrentDomain.GetAssemblies();
+        if (!string.IsNullOrWhiteSpace(preferredModKey))
+        {
+            assemblies = assemblies.Where(a =>
+                string.Equals(NormalizeHotReloadModKey(a.GetName().Name), preferredModKey, StringComparison.OrdinalIgnoreCase));
+        }
+
+        var candidates = assemblies
+            .SelectMany(a => GetLoadableTypes(a, null, null))
+            .Where(t => MatchesRequestedName(t, typeName, requireExactFullName))
+            .GroupBy(t => t.AssemblyQualifiedName ?? $"{t.Assembly.FullName}:{t.FullName ?? t.Name}", StringComparer.Ordinal)
+            .Select(g => g.First())
+            .ToList();
+
+        if (candidates.Count == 0)
+            return null;
+
+        var fullNameMatches = candidates
+            .Where(t => string.Equals(t.FullName, typeName, StringComparison.Ordinal))
+            .ToList();
+        if (fullNameMatches.Count == 1)
+            return fullNameMatches[0];
+        if (fullNameMatches.Count > 1)
+        {
+            if (!string.IsNullOrWhiteSpace(preferredModKey))
+            {
+                var scopedMatch = fullNameMatches
+                    .FirstOrDefault(t => string.Equals(
+                        NormalizeHotReloadModKey(t.Assembly.GetName().Name),
+                        preferredModKey,
+                        StringComparison.OrdinalIgnoreCase));
+                if (scopedMatch != null)
+                    return scopedMatch;
+            }
+            return null;
+        }
+
+        if (requireExactFullName)
+            return null;
+
+        var shortNameMatches = candidates
+            .Where(t => string.Equals(t.Name, typeName, StringComparison.Ordinal))
+            .ToList();
+        if (shortNameMatches.Count == 1)
+            return shortNameMatches[0];
+        if (shortNameMatches.Count > 1 && !string.IsNullOrWhiteSpace(preferredModKey))
+        {
+            var scopedShortMatches = shortNameMatches
+                .Where(t => string.Equals(
+                    NormalizeHotReloadModKey(t.Assembly.GetName().Name),
+                    preferredModKey,
+                    StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (scopedShortMatches.Count == 1)
+                return scopedShortMatches[0];
+        }
+
+        return null;
+    }
+
+    // ─── Assembly-Level Pool Discovery ────────────────────────────────────
+
+    private static int DiscoverAndRegisterPoolsFromAssembly(Assembly assembly, List<string> errors, List<string> warnings)
+    {
+        int discovered = 0;
+        foreach (var type in GetLoadableTypes(assembly, warnings, "pool_discovery"))
+        {
+            if (type.IsAbstract || type.IsInterface) continue;
+            try
+            {
+                // Look for [Pool(typeof(...))] attributes by name (BaseLib attribute)
+                foreach (var attr in type.GetCustomAttributes(false))
+                {
+                    var attrType = attr.GetType();
+                    if (attrType.Name != "PoolAttribute") continue;
+
+                    // Extract the pool type from the attribute's constructor argument
+                    // PoolAttribute typically has a Type property or constructor param
+                    var poolTypeProp = attrType.GetProperty("PoolType")
+                        ?? attrType.GetProperty("Type")
+                        ?? attrType.GetProperty("Pool");
+                    Type? poolType = null;
+                    if (poolTypeProp != null)
+                    {
+                        poolType = poolTypeProp.GetValue(attr) as Type;
+                    }
+                    else
+                    {
+                        // Try constructor argument via CustomAttributeData
+                        var attrData = type.GetCustomAttributesData()
+                            .FirstOrDefault(d => d.AttributeType.Name == "PoolAttribute");
+                        if (attrData?.ConstructorArguments.Count > 0)
+                        {
+                            poolType = attrData.ConstructorArguments[0].Value as Type;
+                        }
+                    }
+
+                    if (poolType == null)
+                    {
+                        warnings.Add($"pool_attr_no_type: {type.Name} has [Pool] but could not extract pool type");
+                        continue;
+                    }
+
+                    try
+                    {
+                        ModHelper.AddModelToPool(poolType, type);
+                        discovered++;
+                        ModEntry.WriteLog($"[HotReload] Pool reg (assembly): {type.Name} → {poolType.Name}");
+                    }
+                    catch (Exception ex)
+                    {
+                        errors.Add($"pool_auto_reg_{type.Name}: {ex.Message}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                warnings.Add($"pool_scan_{type.Name}: {ex.Message}");
+            }
+        }
+        if (discovered > 0)
+            ModEntry.WriteLog($"[HotReload] Assembly-level pool discovery: {discovered} registrations");
+        return discovered;
+    }
+
+    // ─── Live Instance Refresh ─────────────────────────────────────────────
+
+    private static object RefreshLiveInstances()
+    {
+        try
+        {
+            var root = ((SceneTree)Engine.GetMainLoop()).Root;
+            int cardsRefreshed = 0, relicsRefreshed = 0, powersRefreshed = 0, potionsRefreshed = 0, monstersRefreshed = 0;
+            var errors = new List<string>();
+
+            // Refresh NCard models
+            try
+            {
+                RefreshNodeModels<MegaCrit.Sts2.Core.Nodes.Cards.NCard>(
+                    root, "NCard",
+                    node => {
+                        var modelProp = node.GetType().GetProperty("Model");
+                        var model = modelProp?.GetValue(node) as AbstractModel;
+                        if (model == null) return false;
+                        var id = model.Id;
+                        var fresh = ModelDb.GetByIdOrNull<CardModel>(id);
+                        if (fresh == null || ReferenceEquals(fresh, model)) return false;
+                        if (fresh.GetType().Assembly == model.GetType().Assembly) return false;
+                        modelProp!.SetValue(node, fresh);
+                        return true;
+                    },
+                    ref cardsRefreshed);
+            }
+            catch (Exception ex)
+            {
+                errors.Add($"cards: {ex.Message}");
+            }
+
+            // Refresh NRelic models
+            try
+            {
+                RefreshNodeModels<MegaCrit.Sts2.Core.Nodes.Relics.NRelic>(
+                    root, "NRelic",
+                    node => {
+                        var modelProp = node.GetType().GetProperty("Model");
+                        var model = modelProp?.GetValue(node) as AbstractModel;
+                        if (model == null) return false;
+                        var id = model.Id;
+                        var fresh = ModelDb.GetByIdOrNull<RelicModel>(id);
+                        if (fresh == null || ReferenceEquals(fresh, model)) return false;
+                        if (fresh.GetType().Assembly == model.GetType().Assembly) return false;
+                        modelProp!.SetValue(node, fresh);
+                        return true;
+                    },
+                    ref relicsRefreshed);
+            }
+            catch (Exception ex)
+            {
+                errors.Add($"relics: {ex.Message}");
+            }
+
+            // Refresh NPower models
+            try
+            {
+                RefreshNodeModels<MegaCrit.Sts2.Core.Nodes.Combat.NPower>(
+                    root, "NPower",
+                    node => {
+                        var modelProp = node.GetType().GetProperty("Model");
+                        var model = modelProp?.GetValue(node) as AbstractModel;
+                        if (model == null) return false;
+                        var id = model.Id;
+                        var fresh = ModelDb.GetByIdOrNull<PowerModel>(id);
+                        if (fresh == null || ReferenceEquals(fresh, model)) return false;
+                        if (fresh.GetType().Assembly == model.GetType().Assembly) return false;
+                        modelProp!.SetValue(node, fresh);
+                        return true;
+                    },
+                    ref powersRefreshed);
+            }
+            catch (Exception ex)
+            {
+                errors.Add($"powers: {ex.Message}");
+            }
+
+            // Refresh NPotion models
+            try
+            {
+                RefreshNodeModels<NPotion>(
+                    root, "NPotion",
+                    node => {
+                        var modelProp = node.GetType().GetProperty("Model");
+                        var model = modelProp?.GetValue(node) as AbstractModel;
+                        if (model == null) return false;
+                        var id = model.Id;
+                        var fresh = ModelDb.GetByIdOrNull<PotionModel>(id);
+                        if (fresh == null || ReferenceEquals(fresh, model)) return false;
+                        if (fresh.GetType().Assembly == model.GetType().Assembly) return false;
+                        modelProp!.SetValue(node, fresh);
+                        return true;
+                    },
+                    ref potionsRefreshed);
+            }
+            catch (Exception ex)
+            {
+                errors.Add($"potions: {ex.Message}");
+            }
+
+            // Refresh NCreature models (monsters)
+            // v0.101.0: NCreature has Entity (Creature) property, monster model at Entity.Monster
+            // Monster is a get-only auto-property — must set via backing field
+            try
+            {
+                RefreshNodeModels<MegaCrit.Sts2.Core.Nodes.Combat.NCreature>(
+                    root, "NCreature",
+                    node => {
+                        var creature = node.Entity;
+                        if (creature == null || !creature.IsMonster) return false;
+                        var model = creature.Monster;
+                        if (model == null) return false;
+                        var id = model.Id;
+                        var fresh = ModelDb.GetByIdOrNull<MonsterModel>(id);
+                        if (fresh == null || ReferenceEquals(fresh, model)) return false;
+                        if (fresh.GetType().Assembly == model.GetType().Assembly) return false;
+                        // Monster is a get-only auto-property, set via compiler-generated backing field
+                        var backingField = creature.GetType().GetField("<Monster>k__BackingField",
+                            BindingFlags.NonPublic | BindingFlags.Instance);
+                        if (backingField != null)
+                        {
+                            backingField.SetValue(creature, fresh);
+                            fresh.Creature = creature;
+                            return true;
+                        }
+                        return false;
+                    },
+                    ref monstersRefreshed);
+            }
+            catch (Exception ex)
+            {
+                errors.Add($"monsters: {ex.Message}");
+            }
+
+            var total = cardsRefreshed + relicsRefreshed + powersRefreshed + potionsRefreshed + monstersRefreshed;
+            ModEntry.WriteLog($"[HotReload] Live refresh: {cardsRefreshed} cards, {relicsRefreshed} relics, {powersRefreshed} powers, {potionsRefreshed} potions, {monstersRefreshed} monsters");
+            EventTracker.Record("refresh_live_instances", $"{total} refreshed ({cardsRefreshed}C {relicsRefreshed}R {powersRefreshed}P {potionsRefreshed}Pot {monstersRefreshed}M)");
+
+            return new
+            {
+                success = errors.Count == 0,
+                cards_refreshed = cardsRefreshed,
+                relics_refreshed = relicsRefreshed,
+                powers_refreshed = powersRefreshed,
+                potions_refreshed = potionsRefreshed,
+                monsters_refreshed = monstersRefreshed,
+                total_refreshed = total,
+                errors,
+            };
+        }
+        catch (Exception ex)
+        {
+            ModEntry.WriteLog($"[HotReload] Live refresh error: {ex}");
+            ExceptionMonitor.Record(ex, "RefreshLiveInstances");
+            return new { error = ex.Message };
+        }
+    }
+
+    private static object? GetObjectPropertyValue(object? owner, params string[] propertyNames)
+    {
+        if (owner == null)
+            return null;
+
+        const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static;
+        foreach (var propertyName in propertyNames)
+        {
+            var property = owner.GetType().GetProperty(propertyName, flags);
+            if (property != null)
+                return property.GetValue(owner);
+        }
+
+        return null;
+    }
+
+    private static IList? GetCollectionItems(object? container, params string[] itemPropertyNames)
+    {
+        if (container is IList list)
+            return list;
+        if (container == null)
+            return null;
+
+        foreach (var propertyName in itemPropertyNames)
+        {
+            if (GetObjectPropertyValue(container, propertyName) is IList propertyList)
+                return propertyList;
+        }
+
+        return null;
+    }
+
+    private static AbstractModel? GetCanonicalModel(AbstractModel currentModel)
+    {
+        return currentModel switch
+        {
+            CardModel => ModelDb.GetByIdOrNull<CardModel>(currentModel.Id),
+            RelicModel => ModelDb.GetByIdOrNull<RelicModel>(currentModel.Id),
+            PowerModel => ModelDb.GetByIdOrNull<PowerModel>(currentModel.Id),
+            PotionModel => ModelDb.GetByIdOrNull<PotionModel>(currentModel.Id),
+            _ => null,
+        };
+    }
+
+    private static bool TryReadMemberValue(object source, string memberName, out object? value)
+    {
+        const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+        var property = source.GetType().GetProperty(memberName, flags);
+        if (property != null && property.CanRead)
+        {
+            value = property.GetValue(source);
+            return true;
+        }
+
+        var field = source.GetType().GetField(memberName, flags);
+        if (field != null)
+        {
+            value = field.GetValue(source);
+            return true;
+        }
+
+        value = null;
+        return false;
+    }
+
+    private static bool CanAssignMemberValue(Type targetType, object? value)
+    {
+        if (value == null)
+            return !targetType.IsValueType || Nullable.GetUnderlyingType(targetType) != null;
+
+        var valueType = value.GetType();
+        if (targetType.IsAssignableFrom(valueType))
+            return true;
+
+        var underlyingNullable = Nullable.GetUnderlyingType(targetType);
+        return underlyingNullable != null && underlyingNullable.IsAssignableFrom(valueType);
+    }
+
+    private static bool TryWriteMemberValue(object target, string memberName, object? value)
+    {
+        const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+        var property = target.GetType().GetProperty(memberName, flags);
+        if (property != null && property.CanWrite && CanAssignMemberValue(property.PropertyType, value))
+        {
+            property.SetValue(target, value);
+            return true;
+        }
+
+        var field = target.GetType().GetField(memberName, flags);
+        if (field != null && !field.IsInitOnly && CanAssignMemberValue(field.FieldType, value))
+        {
+            field.SetValue(target, value);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static IEnumerable<string> GetRuntimeStateMemberNames(AbstractModel model)
+    {
+        if (model is CardModel)
+        {
+            return
+            [
+                "CostForTurn",
+                "CurrentCost",
+                "TemporaryCost",
+                "IsTemporaryCostModified",
+                "FreeToPlay",
+                "Retain",
+                "Ethereal",
+                "Exhaust",
+                "Exhausts",
+                "WasDiscarded",
+                "WasDrawnThisTurn",
+                "PlayedThisTurn",
+                "Misc",
+                "Counter",
+                "TurnsInHand",
+            ];
+        }
+
+        if (model is RelicModel)
+        {
+            return
+            [
+                "Counter",
+                "Charges",
+                "UsesRemaining",
+                "Cooldown",
+                "TriggeredThisTurn",
+                "TriggeredThisCombat",
+                "PulseActive",
+                "IsDisabled",
+                "Grayscale",
+            ];
+        }
+
+        if (model is PowerModel)
+        {
+            return
+            [
+                "Stacks",
+                "Amount",
+                "Counter",
+                "TurnsRemaining",
+                "TriggeredThisTurn",
+                "TriggeredThisCombat",
+                "PulseActive",
+                "JustApplied",
+            ];
+        }
+
+        if (model is PotionModel)
+        {
+            return
+            [
+                "Charges",
+                "UsesRemaining",
+                "Counter",
+                "TriggeredThisCombat",
+            ];
+        }
+
+        return Array.Empty<string>();
+    }
+
+    private static void CopyNamedRuntimeState(object source, object target, IEnumerable<string> memberNames)
+    {
+        foreach (var memberName in memberNames.Distinct(StringComparer.Ordinal))
+        {
+            if (TryReadMemberValue(source, memberName, out var value))
+                TryWriteMemberValue(target, memberName, value);
+        }
+    }
+
+    private static void ApplyCardUpgradeState(object source, object target)
+    {
+        int upgrades = 0;
+        if (TryReadMemberValue(source, "TimesUpgraded", out var timesUpgradedValue) && timesUpgradedValue is int timesUpgraded)
+        {
+            upgrades = timesUpgraded;
+        }
+        else if (TryReadMemberValue(source, "UpgradeCount", out var upgradeCountValue) && upgradeCountValue is int upgradeCount)
+        {
+            upgrades = upgradeCount;
+        }
+        else if (TryReadMemberValue(source, "IsUpgraded", out var upgradedValue) && upgradedValue is bool isUpgraded && isUpgraded)
+        {
+            upgrades = 1;
+        }
+
+        if (upgrades <= 0)
+            return;
+
+        var upgradeMethod = target.GetType().GetMethod("Upgrade", BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null);
+        if (upgradeMethod == null)
+            return;
+
+        for (int i = 0; i < upgrades; i++)
+        {
+            try
+            {
+                upgradeMethod.Invoke(target, null);
+            }
+            catch
+            {
+                break;
+            }
+        }
+    }
+
+    private static bool TryRefreshModelInstance(object? instance, string assemblyKey, HashSet<string> reloadedTypeFullNames, out object? replacement)
+    {
+        replacement = null;
+        if (instance is not AbstractModel currentModel)
+            return false;
+
+        if (!string.Equals(
+                NormalizeHotReloadModKey(currentModel.GetType().Assembly.GetName().Name),
+                assemblyKey,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var currentTypeName = currentModel.GetType().FullName ?? currentModel.GetType().Name;
+        var canonicalModel = GetCanonicalModel(currentModel);
+        if (!reloadedTypeFullNames.Contains(currentTypeName))
+        {
+            if (canonicalModel == null
+                || !string.Equals(
+                    NormalizeHotReloadModKey(canonicalModel.GetType().Assembly.GetName().Name),
+                    assemblyKey,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
+
+        // ToMutable() is defined on each model subclass, not on AbstractModel — invoke via reflection
+        var toMutableMethod = canonicalModel?.GetType().GetMethod("ToMutable");
+        var mutable = toMutableMethod?.Invoke(canonicalModel, null) as AbstractModel;
+        if (mutable == null)
+            return false;
+
+        if (currentModel is CardModel)
+            ApplyCardUpgradeState(currentModel, mutable);
+
+        CopyNamedRuntimeState(currentModel, mutable, GetRuntimeStateMemberNames(currentModel));
+        replacement = mutable;
+        return true;
+    }
+
+    private static int RefreshModelList(IList? items, string assemblyKey, HashSet<string> reloadedTypeFullNames)
+    {
+        if (items == null)
+            return 0;
+
+        int refreshed = 0;
+        for (int i = 0; i < items.Count; i++)
+        {
+            try
+            {
+                if (TryRefreshModelInstance(items[i], assemblyKey, reloadedTypeFullNames, out var replacement))
+                {
+                    items[i] = replacement;
+                    refreshed++;
+                }
+            }
+            catch
+            {
+                // Best effort: leave the existing runtime instance in place if migration fails.
+            }
+        }
+
+        return refreshed;
+    }
+
+    /// <summary>
+    /// Refresh mutable card/relic/power/potion instances in the current run's state.
+    /// Replaces instances belonging to the reloaded mod with fresh ToMutable() copies,
+    /// keyed by mod identity and canonical ModelId lookup rather than short type names.
+    /// </summary>
+    private static int RefreshRunInstances(Assembly reloadedAssembly, string modKey)
+    {
+        int refreshed = 0;
+        string assemblyKey = string.IsNullOrWhiteSpace(modKey)
+            ? NormalizeHotReloadModKey(reloadedAssembly.GetName().Name)
+            : modKey;
+        var reloadedTypeFullNames = new HashSet<string>(
+            GetLoadableTypes(reloadedAssembly, null, null)
+                .Where(t => !t.IsAbstract && !t.IsInterface)
+                .Select(t => t.FullName ?? t.Name),
+            StringComparer.Ordinal);
+
+        try
+        {
+            var runManagerType = AppDomain.CurrentDomain.GetAssemblies()
+                .SelectMany(a => GetLoadableTypes(a, null, null))
+                .FirstOrDefault(t => t.Name == "RunManager");
+            if (runManagerType == null)
+                return 0;
+
+            var currentRun = runManagerType.GetProperty("CurrentRun", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+            if (currentRun == null)
+                return 0;
+
+            if (GetObjectPropertyValue(currentRun, "Players") is not IEnumerable players)
+                return 0;
+
+            foreach (var player in players)
+            {
+                refreshed += RefreshModelList(
+                    GetCollectionItems(GetObjectPropertyValue(player, "MasterDeck", "Deck"), "Cards"),
+                    assemblyKey,
+                    reloadedTypeFullNames);
+                refreshed += RefreshModelList(
+                    GetCollectionItems(GetObjectPropertyValue(player, "Relics"), "Items"),
+                    assemblyKey,
+                    reloadedTypeFullNames);
+                refreshed += RefreshModelList(
+                    GetCollectionItems(GetObjectPropertyValue(player, "Potions"), "Items"),
+                    assemblyKey,
+                    reloadedTypeFullNames);
+
+                var playerCombatState = GetObjectPropertyValue(player, "PlayerCombatState", "CombatState");
+                if (playerCombatState == null)
+                    continue;
+
+                foreach (var pileName in new[] { "Hand", "DrawPile", "DiscardPile", "ExhaustPile" })
+                {
+                    refreshed += RefreshModelList(
+                        GetCollectionItems(GetObjectPropertyValue(playerCombatState, pileName), "Cards"),
+                        assemblyKey,
+                        reloadedTypeFullNames);
+                }
+
+                refreshed += RefreshModelList(
+                    GetCollectionItems(GetObjectPropertyValue(playerCombatState, "PlayerPowers", "Powers"), "Items"),
+                    assemblyKey,
+                    reloadedTypeFullNames);
+            }
+        }
+        catch (Exception ex)
+        {
+            ModEntry.WriteLog($"[HotReload] Run instance refresh error: {ex}");
+        }
+
+        return refreshed;
+    }
+
+    private static void RefreshNodeModels<T>(Node root, string typeName, Func<T, bool> refreshFunc, ref int count) where T : Node
+    {
+        var queue = new Queue<Node>();
+        queue.Enqueue(root);
+        while (queue.Count > 0)
+        {
+            var node = queue.Dequeue();
+            if (node is T typed)
+            {
+                try
+                {
+                    if (refreshFunc(typed))
+                        count++;
+                }
+                catch { /* skip individual node failures */ }
+            }
+            for (int i = 0; i < node.GetChildCount(); i++)
+                queue.Enqueue(node.GetChild(i));
+        }
+    }
+
+    private static object ReloadLocalization()
+    {
+        try
+        {
+            var locManager = LocManager.Instance;
+            if (locManager == null)
+                return new { error = "LocManager.Instance is null" };
+
+            var lang = locManager.Language;
+            locManager.SetLanguage(lang);
+            ModEntry.WriteLog($"[HotReload] Localization reloaded for language: {lang}");
+            EventTracker.Record("reload_localization", $"Language: {lang}");
+            return new { success = true, language = lang };
+        }
+        catch (Exception ex)
+        {
+            ModEntry.WriteLog($"[HotReload] Localization reload error: {ex}");
+            ExceptionMonitor.Record(ex, "ReloadLocalization");
+            return new { error = ex.Message };
+        }
+    }
+
     // ─── Exception Monitor ──────────────────────────────────────────────────
 
     private static object GetExceptions(JsonElement root)
@@ -4495,14 +6612,38 @@ public static class BridgeHandler
                     if (mainMenu == null)
                         return new { error = "Not on main menu" };
 
-                    // Call SingleplayerButtonPressed
-                    var method = mainMenu.GetType().GetMethod("SingleplayerButtonPressed",
-                        BindingFlags.NonPublic | BindingFlags.Instance);
-                    if (method == null)
-                        return new { error = "Could not find SingleplayerButtonPressed" };
+                    // v0.101.0+: MainMenu → NSingleplayerSubmenu → CharacterSelect
+                    // Use OpenSingleplayerSubmenu (public) to get the submenu, then
+                    // invoke OpenCharacterSelect (private) to push through to character select
+                    var openSubMethod = mainMenu.GetType().GetMethod("OpenSingleplayerSubmenu",
+                        BindingFlags.Public | BindingFlags.Instance);
+                    if (openSubMethod != null)
+                    {
+                        var submenu = openSubMethod.Invoke(mainMenu, null);
+                        if (submenu != null)
+                        {
+                            var charSelectMethod = submenu.GetType().GetMethod("OpenCharacterSelect",
+                                BindingFlags.NonPublic | BindingFlags.Instance);
+                            if (charSelectMethod != null)
+                            {
+                                charSelectMethod.Invoke(submenu, new object?[] { null });
+                                ModEntry.WriteLog("[navigate_menu] OpenSingleplayerSubmenu → OpenCharacterSelect");
+                                return new { success = true, target, invoked = "OpenSingleplayerSubmenu+OpenCharacterSelect" };
+                            }
+                        }
+                        // Submenu opened but couldn't push to character select — still usable
+                        ModEntry.WriteLog("[navigate_menu] OpenSingleplayerSubmenu (stopped at submenu)");
+                        return new { success = true, target, invoked = "OpenSingleplayerSubmenu" };
+                    }
 
-                    method.Invoke(mainMenu, new object?[] { null });
-                    ModEntry.WriteLog("[navigate_menu] Invoked SingleplayerButtonPressed");
+                    // Fallback for older game versions: call SingleplayerButtonPressed directly
+                    var fallback = mainMenu.GetType().GetMethod("SingleplayerButtonPressed",
+                        BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (fallback == null)
+                        return new { error = "Could not find SingleplayerButtonPressed or OpenSingleplayerSubmenu" };
+
+                    fallback.Invoke(mainMenu, new object?[] { null });
+                    ModEntry.WriteLog("[navigate_menu] Invoked SingleplayerButtonPressed (fallback)");
                     return new { success = true, target, invoked = "SingleplayerButtonPressed" };
                 }
 
@@ -5170,5 +7311,568 @@ void fragment() {
 
         body.PivotOffset = new Vector2(halfWidth, halfHeight);
         body.Scale = Vector2.One;
+    }
+
+    // ─── FMOD Audio Test ────────────────────────────────────────────────────
+
+    private static GodotObject? _fmodServer;
+    private static GodotObject? GetFmodServer()
+    {
+        if (_fmodServer != null) return _fmodServer;
+        try { _fmodServer = GodotEngine.GetSingleton("FmodServer"); }
+        catch { }
+        return _fmodServer;
+    }
+
+    private static object FmodTest(JsonElement root)
+    {
+        var results = new List<string>();
+        string action = "probe";
+        if (root.TryGetProperty("params", out var p))
+        {
+            if (p.TryGetProperty("action", out var actionProp))
+                action = actionProp.GetString() ?? "probe";
+        }
+
+        try
+        {
+            // Step 1: Get FmodServer singleton
+            GodotObject? fmodServer = null;
+            try
+            {
+                fmodServer = GodotEngine.GetSingleton("FmodServer");
+                results.Add($"FmodServer singleton: {fmodServer?.GetClass() ?? "null"}");
+            }
+            catch (Exception ex)
+            {
+                results.Add($"FmodServer singleton FAILED: {ex.Message}");
+                return new { success = false, results, error = "Cannot access FmodServer" };
+            }
+
+            if (fmodServer == null)
+                return new { success = false, results, error = "FmodServer is null" };
+
+            if (action == "probe")
+            {
+                // List interesting methods
+                var methods = fmodServer.GetMethodList();
+                var methodNames = new List<string>();
+                foreach (var method in methods)
+                {
+                    var name = method["name"].AsString();
+                    if (name.Contains("play") || name.Contains("load") || name.Contains("bank") ||
+                        name.Contains("sound") || name.Contains("music") || name.Contains("event") ||
+                        name.Contains("create") || name.Contains("file"))
+                    {
+                        methodNames.Add(name);
+                    }
+                }
+                results.Add($"Found {methods.Count} total methods, {methodNames.Count} audio-related");
+                return new { success = true, results, audio_methods = methodNames };
+            }
+
+            if (action == "play_existing")
+            {
+                // Play an existing FMOD event directly via FmodServer
+                string eventPath = "event:/sfx/heal";
+                if (root.TryGetProperty("params", out var pp) && pp.TryGetProperty("event", out var evProp))
+                    eventPath = evProp.GetString() ?? eventPath;
+
+                try
+                {
+                    fmodServer.Call("play_one_shot", eventPath);
+                    results.Add($"play_one_shot('{eventPath}') succeeded!");
+                    return new { success = true, results, @event = eventPath };
+                }
+                catch (Exception ex)
+                {
+                    results.Add($"play_one_shot failed: {ex.Message}");
+
+                    // Try create_event_instance approach
+                    try
+                    {
+                        var instance = fmodServer.Call("create_event_instance", eventPath);
+                        results.Add($"create_event_instance returned: {instance}");
+                        if (instance.Obj is GodotObject fmodEvent)
+                        {
+                            fmodEvent.Call("start");
+                            fmodEvent.Call("release");
+                            results.Add("Event started via create_event_instance!");
+                            return new { success = true, results, @event = eventPath, method = "create_event_instance" };
+                        }
+                    }
+                    catch (Exception ex2)
+                    {
+                        results.Add($"create_event_instance also failed: {ex2.Message}");
+                    }
+                    return new { success = false, results };
+                }
+            }
+
+            if (action == "load_file")
+            {
+                // Try to load a custom audio file via FmodServer
+                string filePath = "";
+                if (root.TryGetProperty("params", out var pp2) && pp2.TryGetProperty("path", out var pathProp))
+                    filePath = pathProp.GetString() ?? "";
+
+                if (string.IsNullOrEmpty(filePath))
+                    return new { success = false, error = "params.path required" };
+
+                results.Add($"Attempting load_file_as_sound: {filePath}");
+                try
+                {
+                    var result = fmodServer.Call("load_file_as_sound", filePath);
+                    results.Add($"load_file_as_sound returned: {result} (type: {result.VariantType})");
+                    return new { success = true, results, loaded = filePath };
+                }
+                catch (Exception ex)
+                {
+                    results.Add($"load_file_as_sound failed: {ex.Message}");
+
+                    // Try load_file_as_music
+                    try
+                    {
+                        var result = fmodServer.Call("load_file_as_music", filePath);
+                        results.Add($"load_file_as_music returned: {result} (type: {result.VariantType})");
+                        return new { success = true, results, loaded = filePath, method = "load_file_as_music" };
+                    }
+                    catch (Exception ex2)
+                    {
+                        results.Add($"load_file_as_music also failed: {ex2.Message}");
+                    }
+
+                    return new { success = false, results };
+                }
+            }
+
+            if (action == "play_fmod_file")
+            {
+                // Load a custom audio file and play it through FMOD
+                string filePath = "";
+                if (root.TryGetProperty("params", out var pp3) && pp3.TryGetProperty("path", out var pathProp))
+                    filePath = pathProp.GetString() ?? "";
+
+                if (string.IsNullOrEmpty(filePath) || !System.IO.File.Exists(filePath))
+                    return new { success = false, error = $"File not found: {filePath}" };
+
+                try
+                {
+                    // Step 1: Load file into FMOD
+                    results.Add($"Loading file: {filePath}");
+                    var fmodFile = fmodServer.Call("load_file_as_sound", filePath);
+                    results.Add($"load_file_as_sound returned: {fmodFile} (type: {fmodFile.VariantType})");
+
+                    // Step 2: Try create_sound_instance with the file path
+                    try
+                    {
+                        results.Add("Trying create_sound_instance with file path...");
+                        var soundInstance = fmodServer.Call("create_sound_instance", filePath);
+                        results.Add($"create_sound_instance returned: {soundInstance} (type: {soundInstance.VariantType})");
+
+                        if (soundInstance.Obj is GodotObject sndObj)
+                        {
+                            // Try to play it - check what methods the sound instance has
+                            var methods = sndObj.GetMethodList();
+                            var methodNames = new List<string>();
+                            foreach (var m in methods)
+                            {
+                                var mName = m["name"].AsString();
+                                if (mName.Contains("play") || mName.Contains("start") || mName.Contains("volume") ||
+                                    mName.Contains("set") || mName.Contains("release") || mName.Contains("stop") ||
+                                    mName.Contains("get") || mName.Contains("is_"))
+                                    methodNames.Add(mName);
+                            }
+                            results.Add($"Sound instance methods: {string.Join(", ", methodNames)}");
+
+                            // Try playing
+                            try
+                            {
+                                sndObj.Call("play");
+                                results.Add("play() succeeded!");
+                                return new { success = true, results, method = "create_sound_instance" };
+                            }
+                            catch (Exception ex)
+                            {
+                                results.Add($"play() failed: {ex.Message}");
+                            }
+
+                            try
+                            {
+                                sndObj.Call("start");
+                                results.Add("start() succeeded!");
+                                return new { success = true, results, method = "create_sound_instance+start" };
+                            }
+                            catch (Exception ex)
+                            {
+                                results.Add($"start() failed: {ex.Message}");
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        results.Add($"create_sound_instance failed: {ex.Message}");
+                    }
+
+                    // Step 3: Try creating a programmer instrument event instance
+                    // and seeing if it picks up the loaded file
+                    try
+                    {
+                        results.Add("Checking if any event uses programmer instrument...");
+                        var allEvents = fmodServer.Call("get_all_event_descriptions");
+                        results.Add($"get_all_event_descriptions returned {allEvents.VariantType}");
+                    }
+                    catch (Exception ex)
+                    {
+                        results.Add($"get_all_event_descriptions failed: {ex.Message}");
+                    }
+
+                    return new { success = false, results, note = "File loaded into FMOD but playback method not yet found" };
+                }
+                catch (Exception ex)
+                {
+                    return new { success = false, error = ex.Message, results };
+                }
+            }
+
+            if (action == "list_buses")
+            {
+                try
+                {
+                    var busResults = new List<object>();
+                    string[] busPaths = { "bus:/", "bus:/master", "bus:/master/sfx", "bus:/master/music", "bus:/master/ambience" };
+                    foreach (var busPath in busPaths)
+                    {
+                        try
+                        {
+                            var bus = fmodServer.Call("get_bus", busPath);
+                            busResults.Add(new { path = busPath, type = bus.VariantType.ToString(), obj = bus.ToString() });
+                        }
+                        catch (Exception ex)
+                        {
+                            busResults.Add(new { path = busPath, error = ex.Message });
+                        }
+                    }
+                    return new { success = true, buses = busResults };
+                }
+                catch (Exception ex)
+                {
+                    return new { success = false, error = ex.Message };
+                }
+            }
+
+            if (action == "test_all")
+            {
+                var testResults = new List<object>();
+                var wav = "";
+                if (root.TryGetProperty("params", out var pp4) && pp4.TryGetProperty("path", out var wavProp))
+                    wav = wavProp.GetString() ?? "";
+
+                // ── Test 1: PlayEvent (play_one_shot) ──
+                try
+                {
+                    fmodServer.Call("play_one_shot", "event:/sfx/heal");
+                    testResults.Add(new { test = "PlayEvent", status = "PASS", detail = "event:/sfx/heal" });
+                }
+                catch (Exception ex)
+                {
+                    testResults.Add(new { test = "PlayEvent", status = "FAIL", detail = ex.Message });
+                }
+
+                System.Threading.Thread.Sleep(300);
+
+                // ── Test 2: PlayEvent with params ──
+                try
+                {
+                    var dict = new Godot.Collections.Dictionary();
+                    dict["EnemyImpact_Intensity"] = 2f;
+                    fmodServer.Call("play_one_shot_with_params", "event:/sfx/enemy/enemy_impact_enemy_size/enemy_impact_base", dict);
+                    testResults.Add(new { test = "PlayEventWithParams", status = "PASS", detail = "enemy_impact with intensity=2" });
+                }
+                catch (Exception ex)
+                {
+                    testResults.Add(new { test = "PlayEventWithParams", status = "FAIL", detail = ex.Message });
+                }
+
+                System.Threading.Thread.Sleep(300);
+
+                // ── Test 3: PlayFile (load_file_as_sound + create_sound_instance + play) ──
+                if (!string.IsNullOrEmpty(wav) && System.IO.File.Exists(wav))
+                {
+                    try
+                    {
+                        fmodServer.Call("load_file_as_sound", wav);
+                        var snd = fmodServer.Call("create_sound_instance", wav).Obj as GodotObject;
+                        snd?.Call("set_volume", 0.8f);
+                        snd?.Call("set_pitch", 1.2f);
+                        snd?.Call("play");
+
+                        bool playing = snd != null && (bool)snd.Call("is_playing");
+                        float vol = snd != null ? snd.Call("get_volume").AsSingle() : -1;
+                        float pitch = snd != null ? snd.Call("get_pitch").AsSingle() : -1;
+
+                        testResults.Add(new { test = "PlayFile", status = "PASS",
+                            detail = $"playing={playing}, vol={vol:F2}, pitch={pitch:F2}" });
+
+                        System.Threading.Thread.Sleep(400);
+                        snd?.Call("stop");
+                        snd?.Call("release");
+                    }
+                    catch (Exception ex)
+                    {
+                        testResults.Add(new { test = "PlayFile", status = "FAIL", detail = ex.Message });
+                    }
+                }
+                else
+                {
+                    testResults.Add(new { test = "PlayFile", status = "SKIP", detail = "No wav path provided" });
+                }
+
+                // ── Test 4: PlayMusic (load_file_as_music + create_sound_instance) ──
+                if (!string.IsNullOrEmpty(wav) && System.IO.File.Exists(wav))
+                {
+                    try
+                    {
+                        // Unload the sound version first, reload as music (streaming)
+                        try { fmodServer.Call("unload_file", wav); } catch { }
+
+                        fmodServer.Call("load_file_as_music", wav);
+                        var snd = fmodServer.Call("create_sound_instance", wav).Obj as GodotObject;
+                        snd?.Call("play");
+                        bool playing = snd != null && (bool)snd.Call("is_playing");
+                        testResults.Add(new { test = "PlayMusic(streaming)", status = "PASS",
+                            detail = $"playing={playing}" });
+
+                        System.Threading.Thread.Sleep(300);
+                        snd?.Call("stop");
+                        snd?.Call("release");
+                        try { fmodServer.Call("unload_file", wav); } catch { }
+                    }
+                    catch (Exception ex)
+                    {
+                        testResults.Add(new { test = "PlayMusic(streaming)", status = "FAIL", detail = ex.Message });
+                    }
+                }
+                else
+                {
+                    testResults.Add(new { test = "PlayMusic(streaming)", status = "SKIP", detail = "No wav path" });
+                }
+
+                // ── Test 5: CreateEventInstance (looping / controllable) ──
+                try
+                {
+                    var inst = fmodServer.Call("create_event_instance", "event:/sfx/buff").Obj as GodotObject;
+                    inst?.Call("set_volume", 0.7f);
+                    inst?.Call("start");
+                    bool valid = inst != null && (bool)inst.Call("is_valid");
+                    testResults.Add(new { test = "CreateEventInstance", status = "PASS",
+                        detail = $"valid={valid}" });
+                    System.Threading.Thread.Sleep(300);
+                    inst?.Call("stop", 1);
+                    inst?.Call("release");
+                }
+                catch (Exception ex)
+                {
+                    testResults.Add(new { test = "CreateEventInstance", status = "FAIL", detail = ex.Message });
+                }
+
+                // ── Test 6: Snapshots ──
+                try
+                {
+                    var snap = fmodServer.Call("create_event_instance", "snapshot:/pause").Obj as GodotObject;
+                    snap?.Call("start");
+                    testResults.Add(new { test = "StartSnapshot", status = "PASS", detail = "snapshot:/pause started" });
+                    System.Threading.Thread.Sleep(500);
+                    snap?.Call("stop", 0); // allow fadeout
+                    snap?.Call("release");
+                    testResults.Add(new { test = "StopSnapshot", status = "PASS", detail = "snapshot stopped with fadeout" });
+                }
+                catch (Exception ex)
+                {
+                    testResults.Add(new { test = "Snapshots", status = "FAIL", detail = ex.Message });
+                }
+
+                System.Threading.Thread.Sleep(300);
+
+                // ── Test 7: Bus control ──
+                try
+                {
+                    var sfxBus = fmodServer.Call("get_bus", "bus:/master/sfx").Obj as GodotObject;
+                    float origVol = sfxBus != null ? sfxBus.Call("get_volume").AsSingle() : -1;
+
+                    // Temporarily lower SFX bus volume
+                    sfxBus?.Call("set_volume", 0.1f);
+                    float lowVol = sfxBus != null ? sfxBus.Call("get_volume").AsSingle() : -1;
+
+                    // Play a sound at low bus volume
+                    fmodServer.Call("play_one_shot", "event:/sfx/debuff");
+                    System.Threading.Thread.Sleep(300);
+
+                    // Restore
+                    sfxBus?.Call("set_volume", origVol);
+                    float restoredVol = sfxBus != null ? sfxBus.Call("get_volume").AsSingle() : -1;
+
+                    testResults.Add(new { test = "BusVolume", status = "PASS",
+                        detail = $"orig={origVol:F3} → low={lowVol:F3} → restored={restoredVol:F3}" });
+
+                    // Test bus mute
+                    sfxBus?.Call("set_mute", true);
+                    fmodServer.Call("play_one_shot", "event:/sfx/buff"); // should be silent
+                    System.Threading.Thread.Sleep(200);
+                    sfxBus?.Call("set_mute", false);
+                    testResults.Add(new { test = "BusMute", status = "PASS", detail = "muted and unmuted SFX bus" });
+
+                    // Test other buses exist
+                    var busNames = new[] { "bus:/master", "bus:/master/music", "bus:/master/ambience",
+                        "bus:/master/sfx/Reverb", "bus:/master/sfx/chorus" };
+                    var foundBuses = new List<string>();
+                    foreach (var bn in busNames)
+                    {
+                        try
+                        {
+                            var b = fmodServer.Call("get_bus", bn).Obj as GodotObject;
+                            if (b != null) foundBuses.Add(bn);
+                        }
+                        catch { }
+                    }
+                    testResults.Add(new { test = "BusExists", status = "PASS",
+                        detail = $"Found {foundBuses.Count}/{busNames.Length}: {string.Join(", ", foundBuses.Select(b => b.Split('/').Last()))}" });
+                }
+                catch (Exception ex)
+                {
+                    testResults.Add(new { test = "BusControl", status = "FAIL", detail = ex.Message });
+                }
+
+                // ── Test 8: Global parameters ──
+                try
+                {
+                    float origProgress = fmodServer.Call("get_global_parameter_by_name", "Progress").AsSingle();
+
+                    // Temporarily change progress
+                    fmodServer.Call("set_global_parameter_by_name", "sfx_duck", 0.5f);
+                    float duckVal = fmodServer.Call("get_global_parameter_by_name", "sfx_duck").AsSingle();
+                    fmodServer.Call("set_global_parameter_by_name", "sfx_duck", 0f); // restore
+
+                    testResults.Add(new { test = "GlobalParameters", status = "PASS",
+                        detail = $"Progress={origProgress:F0}, sfx_duck set to {duckVal:F2} and restored" });
+                }
+                catch (Exception ex)
+                {
+                    testResults.Add(new { test = "GlobalParameters", status = "FAIL", detail = ex.Message });
+                }
+
+                // ── Test 9: SetGlobalParameterByLabel ──
+                try
+                {
+                    fmodServer.Call("set_global_parameter_by_name_with_label", "sfx_duck", "0");
+                    testResults.Add(new { test = "GlobalParamByLabel", status = "PASS", detail = "set_global_parameter_by_name_with_label worked" });
+                }
+                catch (Exception ex)
+                {
+                    testResults.Add(new { test = "GlobalParamByLabel", status = "FAIL", detail = ex.Message });
+                }
+
+                // ── Test 10: Mute/Unmute all ──
+                try
+                {
+                    fmodServer.Call("mute_all_events");
+                    fmodServer.Call("play_one_shot", "event:/sfx/heal"); // should be silent
+                    System.Threading.Thread.Sleep(200);
+                    fmodServer.Call("unmute_all_events");
+                    testResults.Add(new { test = "MuteUnmuteAll", status = "PASS", detail = "muted, played (silent), unmuted" });
+                }
+                catch (Exception ex)
+                {
+                    testResults.Add(new { test = "MuteUnmuteAll", status = "FAIL", detail = ex.Message });
+                }
+
+                // ── Test 11: Pause/Unpause all ──
+                try
+                {
+                    fmodServer.Call("pause_all_events");
+                    System.Threading.Thread.Sleep(200);
+                    fmodServer.Call("unpause_all_events");
+                    testResults.Add(new { test = "PauseUnpauseAll", status = "PASS", detail = "paused and unpaused" });
+                }
+                catch (Exception ex)
+                {
+                    testResults.Add(new { test = "PauseUnpauseAll", status = "FAIL", detail = ex.Message });
+                }
+
+                // ── Test 12: EventExists / BusExists ──
+                try
+                {
+                    bool healExists = fmodServer.Call("check_event_path", "event:/sfx/heal").AsBool();
+                    bool fakeExists = fmodServer.Call("check_event_path", "event:/sfx/totally_fake_event").AsBool();
+                    bool sfxBusExists = fmodServer.Call("check_bus_path", "bus:/master/sfx").AsBool();
+                    bool fakeBusExists = fmodServer.Call("check_bus_path", "bus:/fake_bus").AsBool();
+
+                    testResults.Add(new { test = "EventExists", status = healExists && !fakeExists ? "PASS" : "FAIL",
+                        detail = $"heal={healExists}, fake={fakeExists}" });
+                    testResults.Add(new { test = "BusExists", status = sfxBusExists && !fakeBusExists ? "PASS" : "FAIL",
+                        detail = $"sfx={sfxBusExists}, fake={fakeBusExists}" });
+                }
+                catch (Exception ex)
+                {
+                    testResults.Add(new { test = "ExistsChecks", status = "FAIL", detail = ex.Message });
+                }
+
+                // ── Test 13: DSP buffer settings ──
+                try
+                {
+                    int bufLen = fmodServer.Call("get_system_dsp_buffer_length").AsInt32();
+                    int bufCount = fmodServer.Call("get_system_dsp_num_buffers").AsInt32();
+                    testResults.Add(new { test = "DspBufferSettings", status = "PASS",
+                        detail = $"length={bufLen}, count={bufCount}" });
+                }
+                catch (Exception ex)
+                {
+                    testResults.Add(new { test = "DspBufferSettings", status = "FAIL", detail = ex.Message });
+                }
+
+                // ── Test 14: Performance data ──
+                try
+                {
+                    var perf = fmodServer.Call("get_performance_data");
+                    testResults.Add(new { test = "PerformanceData", status = "PASS",
+                        detail = $"type={perf.VariantType}, value={perf.ToString()?.Substring(0, Math.Min(200, perf.ToString()?.Length ?? 0))}" });
+                }
+                catch (Exception ex)
+                {
+                    testResults.Add(new { test = "PerformanceData", status = "FAIL", detail = ex.Message });
+                }
+
+                // ── Test 15: PlayEventByGuid ──
+                try
+                {
+                    // Get the GUID for the heal event
+                    var guid = fmodServer.Call("get_event_guid", "event:/sfx/heal");
+                    fmodServer.Call("play_one_shot_using_guid", guid.AsString());
+                    testResults.Add(new { test = "PlayEventByGuid", status = "PASS",
+                        detail = $"guid={guid}" });
+                }
+                catch (Exception ex)
+                {
+                    testResults.Add(new { test = "PlayEventByGuid", status = "FAIL", detail = ex.Message });
+                }
+
+                // ── Summary ──
+                int passed = testResults.Count(r => r.GetType().GetProperty("status")?.GetValue(r)?.ToString() == "PASS");
+                int failed = testResults.Count(r => r.GetType().GetProperty("status")?.GetValue(r)?.ToString() == "FAIL");
+                int skipped = testResults.Count(r => r.GetType().GetProperty("status")?.GetValue(r)?.ToString() == "SKIP");
+
+                // Final confirmation sound
+                System.Threading.Thread.Sleep(200);
+                fmodServer.Call("play_one_shot", "event:/sfx/npcs/merchant/merchant_thank_yous");
+
+                return new { success = failed == 0, passed, failed, skipped, total = testResults.Count, tests = testResults };
+            }
+
+            return new { success = false, error = $"Unknown action: {action}. Use: probe, play_existing, load_file, play_fmod_file, list_buses, test_all" };
+        }
+        catch (Exception ex)
+        {
+            return new { success = false, error = ex.Message, results };
+        }
     }
 }

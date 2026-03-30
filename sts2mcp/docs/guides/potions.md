@@ -7,8 +7,8 @@ Potions are single-use consumable items. Override key properties:
 - `Rarity` — PotionRarity.Common, Uncommon, Rare
 - `Usage` — When the potion can be used:
   - `PotionUsage.CombatOnly` — Only during combat (most combat potions)
-  - `PotionUsage.OutOfCombat` — Only on the map (healing, utility)
-  - `PotionUsage.Anywhere` — Both in and out of combat
+  - `PotionUsage.AnyTime` — Usable both in and out of combat (healing, utility)
+  - `PotionUsage.Automatic` — Auto-triggered (e.g. Fairy in a Bottle)
 - `TargetType` — Who/what the potion targets:
   - `PotionTargetType.None` — No target needed (self-buff, AoE)
   - `PotionTargetType.AnyEnemy` — Must select an enemy
