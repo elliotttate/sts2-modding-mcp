@@ -27,15 +27,16 @@ def _payload(response: dict) -> dict:
     return response
 
 
-def send_request(method: str, params: dict | None = None, request_id: int = 1) -> dict:
+def send_request(method: str, params: dict | None = None, request_id: int = 1, timeout: float | None = None) -> dict:
     """Send a JSON-RPC request to the bridge mod and return the parsed response."""
     request = {"method": method, "id": request_id}
     if params:
         request["params"] = params
 
+    effective_timeout = timeout if timeout is not None else TIMEOUT
     try:
-        with socket.create_connection((BRIDGE_HOST, BRIDGE_PORT), timeout=TIMEOUT) as sock:
-            sock.settimeout(TIMEOUT)
+        with socket.create_connection((BRIDGE_HOST, BRIDGE_PORT), timeout=effective_timeout) as sock:
+            sock.settimeout(effective_timeout)
             payload = json.dumps(request) + "\n"
             sock.sendall(payload.encode("utf-8"))
 
@@ -464,6 +465,81 @@ def manipulate_state(changes: dict) -> dict:
 def hot_swap_patches(dll_path: str) -> dict:
     """Hot-swap Harmony patches from a new DLL without restarting the game."""
     return send_request("hot_swap_patches", {"dll_path": dll_path})
+
+
+def hot_reload(
+    dll_path: str,
+    tier: int = 2,
+    pck_path: str = "",
+    pool_registrations: list[dict] | None = None,
+) -> dict:
+    """Full hot reload: patches + entities + localization + optional PCK.
+
+    Tiers:
+        1 = Harmony patches only (same as hot_swap_patches)
+        2 = patches + entity models (ModelDb re-registration) + localization
+        3 = tier 2 + PCK resource remount
+
+    Args:
+        dll_path: Path to the newly built mod DLL.
+        tier: Reload tier (1, 2, or 3).
+        pck_path: Path to PCK file (tier 3 only).
+        pool_registrations: List of {"pool_type": "...", "model_type": "..."} dicts
+            for re-registering entities into card/relic/potion pools. Pass an
+            explicit empty list to disable bridge-side pool auto-discovery.
+
+    Retries up to 3 times with exponential backoff for transient errors:
+    - "already in progress" (previous reload still running)
+    - Connection refused (game briefly unresponsive)
+    - Socket timeout (long reload in progress)
+    """
+    params: dict[str, Any] = {"dll_path": dll_path, "tier": tier}
+    if pck_path:
+        params["pck_path"] = pck_path
+    if pool_registrations is not None:
+        params["pool_registrations"] = pool_registrations
+
+    _RETRYABLE_ERRORS = ("already in progress", "bridge not running", "bridge timed out")
+    result: dict = {}
+    for attempt in range(3):
+        result = send_request("hot_reload", params, timeout=30.0)
+        payload = result
+        if isinstance(result, dict) and isinstance(result.get("result"), dict):
+            payload = result["result"]
+        error = payload.get("error", "") if isinstance(payload, dict) else ""
+        if any(msg in error.lower() for msg in _RETRYABLE_ERRORS) and attempt < 2:
+            time.sleep(1 * (2 ** attempt))  # 1s, 2s
+            continue
+        return result
+    return result
+
+
+def reload_localization() -> dict:
+    """Reload localization tables without rebuilding. Picks up changed JSON files."""
+    return send_request("reload_localization")
+
+
+def reload_history() -> dict:
+    """Get the last N hot reload results with timestamps and diagnostics."""
+    return send_request("reload_history")
+
+
+def hot_reload_progress() -> dict:
+    """Get the current hot reload step (if a reload is in progress)."""
+    return send_request("hot_reload_progress")
+
+
+def refresh_live_instances() -> dict:
+    """Refresh live card/relic/power instances in the scene tree after hot reload.
+
+    Walks the Godot scene tree and re-sets Model properties on NCard, NRelic, and
+    NPower nodes to fresh instances from ModelDb. This makes changes visible
+    immediately in the current combat/run without requiring a new encounter.
+
+    Called automatically as part of tier 2+ hot_reload, but can also be invoked
+    standalone to force a visual refresh.
+    """
+    return send_request("refresh_live_instances")
 
 
 def get_exceptions(max_count: int = 20, since_id: int = 0) -> dict:

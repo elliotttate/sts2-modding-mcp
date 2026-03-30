@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -153,6 +154,59 @@ def _is_managed_artifact_name(name: str) -> bool:
     return any(name.endswith(suffix) for suffix in MANAGED_ARTIFACT_SUFFIXES)
 
 
+def _detect_deployed_dependency_versions(mods_dir: Path) -> dict[str, str]:
+    """Scan the game's mods directory for deployed dependency DLLs and read their versions.
+
+    Returns a dict like {"BaseLib": "0.1.9.0"} for use as MSBuild properties.
+    """
+    versions: dict[str, str] = {}
+    if not mods_dir.exists():
+        return versions
+    for mod_folder in mods_dir.iterdir():
+        if not mod_folder.is_dir():
+            continue
+        for dll in mod_folder.glob("*.dll"):
+            name = dll.stem
+            if name in versions or name in DEFAULT_CONFIG_EXCLUSIONS:
+                continue
+            # Only detect well-known dependency DLLs (avoid scanning every mod's main DLL)
+            if name not in ("BaseLib",):
+                continue
+            try:
+                result = subprocess.run(
+                    ["dotnet", "--roll-forward", "LatestMajor",
+                     "exec", "--runtimeconfig", str(dll.parent / f"{name}.runtimeconfig.json"),
+                     str(dll)],
+                    capture_output=True, text=True, timeout=5,
+                )
+            except Exception:
+                pass
+            # Simpler approach: read the PE version info via AssemblyName
+            try:
+                probe = subprocess.run(
+                    ["dotnet", "script", "eval",
+                     f"System.Reflection.AssemblyName.GetAssemblyName(@\"{dll}\").Version"],
+                    capture_output=True, text=True, timeout=10,
+                )
+            except Exception:
+                pass
+            # Most reliable: read the version from the DLL's metadata using a regex on the binary
+            try:
+                import re as _re
+                raw = dll.read_bytes()
+                # Look for AssemblyVersion attribute value in the metadata
+                # Format: "Version=X.Y.Z.W" near the assembly name
+                pattern = _re.compile(
+                    name.encode() + rb".*?Version=(\d+\.\d+\.\d+\.\d+)", _re.DOTALL
+                )
+                match = pattern.search(raw[:8192])  # Check first 8KB
+                if match:
+                    versions[name] = match.group(1).decode()
+            except Exception:
+                pass
+    return versions
+
+
 def _resolve_project_context(project_dir: str | Path) -> ProjectContext:
     project = Path(project_dir)
     if not project.exists():
@@ -167,8 +221,23 @@ def _resolve_project_context(project_dir: str | Path) -> ProjectContext:
         except json.JSONDecodeError as exc:
             warnings.append(f"mod_manifest.json is invalid JSON: {exc}")
     else:
+        # Auto-discover non-standard manifest names (e.g., HermitMod.json)
         manifest_path = None
-        warnings.append("mod_manifest.json not found")
+        for json_file in sorted(project.glob("*.json")):
+            if json_file.name.lower() in ("mod_manifest.json", "mod_config.json"):
+                continue
+            if json_file.name.lower().endswith((".deps.json", ".runtimeconfig.json")):
+                continue
+            try:
+                candidate = json.loads(json_file.read_text(encoding="utf-8-sig"))
+                if isinstance(candidate, dict) and "id" in candidate and "has_dll" in candidate:
+                    manifest = candidate
+                    manifest_path = json_file
+                    break
+            except (json.JSONDecodeError, OSError):
+                continue
+        if manifest_path is None:
+            warnings.append("mod_manifest.json not found (also checked *.json in project root)")
 
     csproj_paths = sorted(project.glob("*.csproj"))
     csproj_path = next(iter(csproj_paths), None)
@@ -759,8 +828,20 @@ def build_project(
     *,
     configuration: str = "Debug",
     timeout: int = 180,
+    game_dir: str | Path | None = None,
+    stamp_version: bool = False,
+    cancel_event: Any = None,
 ) -> dict[str, Any]:
-    """Build a mod project with dotnet using project-aware defaults."""
+    """Build a mod project with dotnet using project-aware defaults.
+
+    Args:
+        stamp_version: If True, pass a unique AssemblyVersion to each build so
+            that .NET's AssemblyLoadContext does not return a cached assembly
+            on hot reload.  The version encodes the current time as
+            ``1.MMDD.HHmm.ssfff`` which is unique per millisecond.
+        cancel_event: Optional ``threading.Event``.  When set during a build,
+            the subprocess is killed and a cancelled result is returned.
+    """
     try:
         context = _resolve_project_context(project_dir)
     except FileNotFoundError as exc:
@@ -770,14 +851,82 @@ def build_project(
         return {"success": False, "error": "No .csproj file found in project directory"}
 
     validation = validate_project(project_dir)
+    env = None
+    if game_dir:
+        env = {**os.environ, "STS2_GAME_DIR": str(game_dir)}
+
+    build_cmd = ["dotnet", "build", str(context.csproj_path), "-c", configuration]
+
+    # Build-time assembly version alignment: detect deployed dependency versions
+    # and pass them to the build to prevent mismatches (e.g., mod builds against
+    # BaseLib 0.2.1.0 from NuGet but game has BaseLib 0.1.0.0 deployed).
+    if game_dir:
+        dep_versions = _detect_deployed_dependency_versions(Path(game_dir) / "mods")
+        for dep_name, dep_version in dep_versions.items():
+            # Pass as MSBuild properties that .csproj can use for PackageReference version
+            build_cmd.append(f"-p:{dep_name}Version={dep_version}")
+
+    if stamp_version:
+        import datetime
+        now = datetime.datetime.now()
+        # Format: 1.MMDD.HHmm.ssfff — unique per millisecond, valid .NET version
+        version = f"1.{now.month:02d}{now.day:02d}.{now.hour:02d}{now.minute:02d}.{now.second:02d}{now.microsecond // 1000:03d}"
+        build_cmd.append(f"-p:AssemblyVersion={version}")
+        # Also stamp the assembly name so the default ALC treats each reload
+        # as a distinct assembly.  Collectible ALCs have cross-ALC type identity
+        # issues that break ModelDb.Inject, entity cloning, and runtime casts.
+        # Using a unique assembly name in the default ALC avoids all of this
+        # at the cost of a small per-reload memory leak (~1 assembly per reload).
+        stamp = now.strftime("%H%M%S%f")[:8]  # HHMMSSff
+        build_cmd.append(f"-p:AssemblyName={context.assembly_name}_hr{stamp}")
+
     try:
-        result = subprocess.run(
-            ["dotnet", "build", str(context.csproj_path), "-c", configuration],
-            capture_output=True,
-            text=True,
-            cwd=str(context.project_dir),
-            timeout=timeout,
-        )
+        if cancel_event is not None:
+            # Use Popen so we can poll the cancel event during the build
+            proc = subprocess.Popen(
+                build_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=str(context.project_dir),
+                env=env,
+            )
+            try:
+                deadline = __import__("time").monotonic() + timeout
+                while proc.poll() is None:
+                    remaining = deadline - __import__("time").monotonic()
+                    if remaining <= 0:
+                        proc.kill()
+                        proc.wait(timeout=5)
+                        return {"success": False, "error": f"Build timed out after {timeout} seconds"}
+                    if cancel_event.is_set():
+                        proc.kill()
+                        proc.wait(timeout=5)
+                        return {"success": False, "cancelled": True, "error": "Build cancelled (new changes detected)"}
+                    # Poll every 200ms for cancel/timeout
+                    try:
+                        proc.wait(timeout=0.2)
+                    except subprocess.TimeoutExpired:
+                        pass
+                stdout = proc.stdout.read() if proc.stdout else ""
+                stderr = proc.stderr.read() if proc.stderr else ""
+                returncode = proc.returncode
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=5)
+        else:
+            result = subprocess.run(
+                build_cmd,
+                capture_output=True,
+                text=True,
+                cwd=str(context.project_dir),
+                timeout=timeout,
+                env=env,
+            )
+            stdout = result.stdout
+            stderr = result.stderr
+            returncode = result.returncode
     except subprocess.TimeoutExpired:
         return {"success": False, "error": f"Build timed out after {timeout} seconds"}
     except FileNotFoundError:
@@ -785,10 +934,10 @@ def build_project(
 
     artifacts = _collect_build_artifacts(context, configuration)
     return {
-        "success": result.returncode == 0,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
-        "return_code": result.returncode,
+        "success": returncode == 0,
+        "stdout": stdout,
+        "stderr": stderr,
+        "return_code": returncode,
         "configuration": configuration,
         "project": context.as_dict(),
         "artifact_files": [str(path) for path in artifacts],
@@ -885,13 +1034,38 @@ def deploy_project(
         if existing.suffix.lower() == ".pck":
             continue
         if _is_managed_artifact_name(existing.name.lower()) and existing.name.lower() not in desired_names:
-            existing.unlink()
-            stale_removed.append(existing.name)
+            try:
+                existing.unlink()
+                stale_removed.append(existing.name)
+            except PermissionError:
+                # File locked (e.g., game is running) — skip stale removal
+                pass
+
+    # Clean up old hot-reload stamped DLLs beyond the most recent 2.
+    # Each hot reload produces a uniquely-named _hrHHMMSSff.dll that accumulates
+    # while the game is running (locked by the default ALC).
+    import re as _re
+    hr_dlls = sorted(
+        (f for f in target_dir.glob("*_hr*.dll") if _re.search(r"_hr\d{6,8}\.dll$", f.name)),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for old_hr in hr_dlls[2:]:
+        if old_hr.name.lower() not in desired_names:
+            try:
+                old_hr.unlink()
+                stale_removed.append(old_hr.name)
+            except PermissionError:
+                pass  # Still locked by running game
 
     for artifact in runtime_artifacts:
         destination = target_dir / artifact.name
-        shutil.copy2(artifact, destination)
-        copied_files.append(destination.name)
+        try:
+            shutil.copy2(artifact, destination)
+            copied_files.append(destination.name)
+        except PermissionError:
+            # File locked (e.g., old DLL held by running game) — skip
+            pass
 
     if not copied_files and context.manifest.get("has_dll", True):
         missing.append(f"No build output found under bin/{configuration} for assembly {context.assembly_name}")
@@ -913,13 +1087,20 @@ def deploy_project(
     for existing_pck in sorted(target_dir.glob("*.pck")):
         if expected_pck_name and existing_pck.name.lower() == expected_pck_name:
             continue
-        existing_pck.unlink()
-        stale_removed.append(existing_pck.name)
+        try:
+            existing_pck.unlink()
+            stale_removed.append(existing_pck.name)
+        except PermissionError:
+            pass
     if include_pck:
         if pck_path and pck_path.exists():
-            shutil.copy2(pck_path, target_dir / pck_path.name)
-            copied_files.append(pck_path.name)
-            desired_names.add(pck_path.name.lower())
+            try:
+                shutil.copy2(pck_path, target_dir / pck_path.name)
+                copied_files.append(pck_path.name)
+                desired_names.add(pck_path.name.lower())
+            except PermissionError:
+                # PCK locked by running game — skip, existing PCK still works
+                pass
         else:
             missing.append(f"{context.pck_name}.pck")
 
@@ -949,6 +1130,9 @@ def build_and_deploy_project(
     mod_name: str = "",
     configuration: str = "Debug",
     build_pck_first: bool | None = None,
+    game_dir: str | Path | None = None,
+    stamp_version: bool = False,
+    cancel_event: Any = None,
 ) -> dict[str, Any]:
     """Build, optionally pack, and deploy a project in one step."""
     validation = validate_project(project_dir)
@@ -959,7 +1143,32 @@ def build_and_deploy_project(
             "error": "Project validation failed; build and deployment skipped",
         }
 
-    build_result = build_project(project_dir, configuration=configuration)
+    context = _resolve_project_context(project_dir)
+    if build_pck_first is None:
+        build_pck_first = context.has_pck
+
+    # Run C# build and PCK build in parallel when both are needed
+    pck_result: dict[str, Any] | None = None
+    if build_pck_first:
+        from concurrent.futures import ThreadPoolExecutor, Future
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            build_future: Future[dict[str, Any]] = executor.submit(
+                build_project, project_dir, configuration=configuration,
+                game_dir=game_dir, stamp_version=stamp_version,
+                cancel_event=cancel_event,
+            )
+            pck_future: Future[dict[str, Any]] = executor.submit(
+                build_project_pck, project_dir,
+            )
+            build_result = build_future.result()
+            pck_result = pck_future.result()
+    else:
+        build_result = build_project(
+            project_dir, configuration=configuration, game_dir=game_dir,
+            stamp_version=stamp_version, cancel_event=cancel_event,
+        )
+
     if not build_result.get("success"):
         return {
             "success": False,
@@ -968,21 +1177,14 @@ def build_and_deploy_project(
             "error": "Build failed; deployment skipped",
         }
 
-    context = _resolve_project_context(project_dir)
-    if build_pck_first is None:
-        build_pck_first = context.has_pck
-
-    pck_result: dict[str, Any] | None = None
-    if build_pck_first:
-        pck_result = build_project_pck(project_dir)
-        if not pck_result.get("success"):
-            return {
-                "success": False,
-                "build": build_result,
-                "pck": pck_result,
-                "validation": validation,
-                "error": "PCK build failed; deployment skipped",
-            }
+    if build_pck_first and pck_result and not pck_result.get("success"):
+        return {
+            "success": False,
+            "build": build_result,
+            "pck": pck_result,
+            "validation": validation,
+            "error": "PCK build failed; deployment skipped",
+        }
 
     deploy_result = deploy_project(
         project_dir,
