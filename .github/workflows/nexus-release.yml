@@ -45,6 +45,7 @@ jobs:
           cp -r explorer_mod/ staging/sts2-modding-mcp/explorer_mod/
 
           # Roslyn analyzer
+          mkdir -p staging/sts2-modding-mcp/tools
           cp -r tools/roslyn_analyzer/ staging/sts2-modding-mcp/tools/roslyn_analyzer/
 
           # Documentation
