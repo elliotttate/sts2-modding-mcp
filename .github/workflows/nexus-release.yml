@@ -1,0 +1,74 @@
+name: Release to Nexus Mods
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g. 3.7.0)'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            # Strip leading 'v' from tag
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package for Nexus
+        run: |
+          mkdir -p staging/sts2-modding-mcp
+
+          # Core MCP server
+          cp -r sts2mcp/ staging/sts2-modding-mcp/sts2mcp/
+          cp run.py staging/sts2-modding-mcp/
+          cp pyproject.toml staging/sts2-modding-mcp/
+          cp requirements.txt staging/sts2-modding-mcp/
+
+          # Bridge & explorer mods (run inside the game)
+          cp -r test_mod/ staging/sts2-modding-mcp/test_mod/
+          cp -r explorer_mod/ staging/sts2-modding-mcp/explorer_mod/
+
+          # Roslyn analyzer
+          cp -r tools/roslyn_analyzer/ staging/sts2-modding-mcp/tools/roslyn_analyzer/
+
+          # Documentation
+          cp README.md staging/sts2-modding-mcp/
+          cp GETTING_STARTED.md staging/sts2-modding-mcp/
+          cp CLAUDE.md staging/sts2-modding-mcp/
+
+          # Clean up build artifacts that may have been checked in
+          find staging/ -type d -name bin -exec rm -rf {} + 2>/dev/null || true
+          find staging/ -type d -name obj -exec rm -rf {} + 2>/dev/null || true
+          find staging/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+          cd staging && zip -r ../sts2-modding-mcp-${{ steps.version.outputs.version }}.zip sts2-modding-mcp/
+
+      - name: Upload to Nexus Mods
+        uses: Nexus-Mods/upload-action@v1.0.0-beta.3
+        with:
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          file_group_id: ${{ secrets.NEXUS_FILE_GROUP_ID }}
+          filename: sts2-modding-mcp-${{ steps.version.outputs.version }}.zip
+          version: ${{ steps.version.outputs.version }}
+          display_name: STS2 Modding MCP v${{ steps.version.outputs.version }}
+          description: |
+            MCP server for Slay the Spire 2 modding — 151 tools for reverse engineering,
+            code generation, building, live scene inspection, and automated playtesting.
+            See GETTING_STARTED.md inside the zip for setup instructions.
+          file_category: main
